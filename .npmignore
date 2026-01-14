@@ -1,0 +1,21 @@
+# Source files (dist is published)
+demo/
+*.test.ts
+
+# Config files
+tsconfig.json
+vite.config.ts
+vite.config.lib.ts
+vitest.config.ts
+
+# Dev files
+.gitignore
+.vscode/
+node_modules/
+
+# Build artifacts not needed
+*.tsbuildinfo
+
+# Test declaration files in dist
+dist/**/*.test.d.ts
+dist/vitest.config.d.ts
