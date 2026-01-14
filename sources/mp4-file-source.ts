@@ -160,7 +160,7 @@ export class MP4FileSource {
   /**
    * Load file using HTTP Range requests (chunked loading)
    */
-  private async loadFromUrlWithRanges(url: string): Promise<MP4FileInfo> {
+  private loadFromUrlWithRanges(url: string): Promise<MP4FileInfo> {
     this.initMP4File();
     
     // Chunk size for progressive loading (256KB is a good balance)
@@ -168,7 +168,7 @@ export class MP4FileSource {
     let offset = 0;
     let metadataResolved = false;
     
-    return new Promise(async (resolve, reject) => {
+    return new Promise((resolve, reject) => {
       // Override onReady to resolve early once metadata is available
       const originalOnReady = this.mp4File!.onReady;
       this.mp4File!.onReady = (info: Movie) => {
@@ -182,47 +182,54 @@ export class MP4FileSource {
         }
       };
       
-      try {
-        // Load chunks until we have metadata or reach end of file
-        while (offset < this.fileSize && !metadataResolved) {
-          const end = Math.min(offset + CHUNK_SIZE - 1, this.fileSize - 1);
-          
-          const response = await fetch(url, {
-            headers: {
-              'Range': `bytes=${offset}-${end}`
+      // Async loading function
+      const loadChunks = async () => {
+        try {
+          // Load chunks until we have metadata or reach end of file
+          while (offset < this.fileSize && !metadataResolved) {
+            const end = Math.min(offset + CHUNK_SIZE - 1, this.fileSize - 1);
+            
+            const response = await fetch(url, {
+              headers: {
+                'Range': `bytes=${offset}-${end}`
+              }
+            });
+            
+            if (!response.ok && response.status !== 206) {
+              throw new Error(`Failed to fetch chunk: ${response.status} ${response.statusText}`);
             }
-          });
-          
-          if (!response.ok && response.status !== 206) {
-            throw new Error(`Failed to fetch chunk: ${response.status} ${response.statusText}`);
+            
+            const chunk = await response.arrayBuffer();
+            
+            // Create buffer with fileStart property for mp4box
+            const buffer = chunk as ArrayBuffer & { fileStart: number };
+            buffer.fileStart = offset;
+            
+            // Update offset and loaded bytes consistently
+            offset += chunk.byteLength;
+            this.loadedBytes = offset;
+            this.events.onProgress?.(this.loadedBytes, this.fileSize);
+            
+            this.mp4File?.appendBuffer(buffer);
           }
           
-          const chunk = await response.arrayBuffer();
-          
-          // Create buffer with fileStart property for mp4box
-          const buffer = chunk as ArrayBuffer & { fileStart: number };
-          buffer.fileStart = offset;
-          
-          offset += chunk.byteLength;
-          this.loadedBytes = offset;
-          this.events.onProgress?.(this.loadedBytes, this.fileSize);
-          
-          this.mp4File?.appendBuffer(buffer);
-        }
-        
-        // If we loaded everything and still no metadata, something went wrong
-        if (!metadataResolved && offset >= this.fileSize) {
-          this.mp4File?.flush();
-          
-          if (this.fileInfo) {
-            resolve(this.fileInfo);
-          } else {
-            reject(new Error('File loaded but no video track found'));
+          // If we loaded everything and still no metadata, something went wrong
+          if (!metadataResolved && offset >= this.fileSize) {
+            this.mp4File?.flush();
+            
+            if (this.fileInfo) {
+              resolve(this.fileInfo);
+            } else {
+              reject(new Error('File loaded but no video track found'));
+            }
           }
+        } catch (error) {
+          reject(error);
         }
-      } catch (error) {
-        reject(error);
-      }
+      };
+      
+      // Start loading
+      loadChunks();
     });
   }
   
@@ -253,12 +260,12 @@ export class MP4FileSource {
           const buffer = chunk as ArrayBuffer & { fileStart: number };
           buffer.fileStart = offset;
           
-          this.loadedBytes = offset + chunk.byteLength;
+          // Update offset and loaded bytes consistently
+          offset += chunk.byteLength;
+          this.loadedBytes = offset;
           this.events.onProgress?.(this.loadedBytes, this.fileSize);
           
           this.mp4File?.appendBuffer(buffer);
-          
-          offset += chunk.byteLength;
         }
         
         // Flush when complete
