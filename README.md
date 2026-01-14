@@ -1,9 +1,10 @@
 # Web Live Player
 
-A framework-agnostic video streaming library with support for MoQ (Media over QUIC) and WebSocket backends.
+A framework-agnostic video streaming library for playing back **Sesame** video streams. Sesame is a video engine that delivers low-latency video over MoQ (Media over QUIC) and WebSocket transports.
 
 ## Features
 
+- **Sesame stream playback** - Native support for Sesame video engine streams
 - **WebCodecs-based decoding** - Hardware-accelerated video decoding
 - **MoQ support** - Native Media over QUIC protocol support via `stinky-moq-js`
 - **Pluggable stream sources** - Use dependency injection to provide video data from any transport
