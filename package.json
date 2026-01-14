@@ -1,6 +1,6 @@
 {
   "name": "@stinkycomputing/web-live-player",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A framework-agnostic video streaming library with MoQ support",
   "type": "module",
   "main": "./dist/web-live-player.cjs",
