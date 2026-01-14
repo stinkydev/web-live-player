@@ -6,6 +6,7 @@
   "main": "./dist/web-live-player.cjs",
   "module": "./dist/web-live-player.mjs",
   "types": "./dist/index.d.ts",
+  "repository": { "url": "https://github.com/stinkydev/web-live-player"},
   "exports": {
     ".": {
       "import": "./dist/web-live-player.mjs",
