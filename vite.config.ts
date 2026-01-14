@@ -3,6 +3,7 @@ import { resolve } from 'path';
 
 export default defineConfig({
   root: resolve(__dirname, 'demo'),
+  base: './',
   
   // Handle tinyh264's .asset files as URLs
   assetsInclude: ['**/*.asset'],

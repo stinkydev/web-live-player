@@ -2,3 +2,4 @@ node_modules
 dist
 dist-demo
 .vite
+.DS_Store

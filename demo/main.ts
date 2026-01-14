@@ -14,6 +14,7 @@ import {
 
 // DOM Elements
 const videoCanvas = document.getElementById('videoCanvas') as HTMLCanvasElement;
+const videoContainer = document.getElementById('videoContainer') as HTMLDivElement;
 const ctx = videoCanvas.getContext('2d')!;
 const statusIndicator = document.getElementById('statusIndicator')!;
 const statusText = document.getElementById('statusText')!;
@@ -36,6 +37,7 @@ const btnDisconnect = document.getElementById('btnDisconnect')!;
 const btnConnectMoq = document.getElementById('btnConnectMoq')!;
 const btnConnectWs = document.getElementById('btnConnectWs')!;
 const btnConnectMock = document.getElementById('btnConnectMock')!;
+const btnFullscreen = document.getElementById('btnFullscreen')!;
 
 // Settings inputs
 const bufferDelayInput = document.getElementById('bufferDelay') as HTMLInputElement;
@@ -744,8 +746,25 @@ fileLoopInput.addEventListener('change', () => {
   }
 });
 
+// Fullscreen toggle
+btnFullscreen.addEventListener('click', () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    videoContainer.requestFullscreen().catch((err) => {
+      log(`Failed to enter fullscreen: ${err.message}`, 'error');
+    });
+  }
+});
+
+// Update fullscreen button icon when fullscreen state changes
+document.addEventListener('fullscreenchange', () => {
+  btnFullscreen.textContent = document.fullscreenElement ? '⛶' : '⛶';
+  btnFullscreen.title = document.fullscreenElement ? 'Exit Fullscreen' : 'Enter Fullscreen';
+});
+
 // Initialize
-log('Web Live Player Demo initialized');
+log('Sesame Video Player Demo initialized');
 log('Select a connection method and click Connect');
 
 // Set initial canvas size
