@@ -17,12 +17,6 @@ A framework-agnostic video streaming library for playing back **Sesame** video s
 npm install @stinkycomputing/web-live-player
 ```
 
-For MoQ support, also install:
-
-```bash
-npm install stinky-moq-js
-```
-
 ## Quick Start
 
 ### Using with MoQ (Standalone)
@@ -33,7 +27,7 @@ import { createPlayer, createStandaloneMoQSource } from '@stinkycomputing/web-li
 // Create player
 const player = createPlayer({
   preferredDecoder: 'webcodecs-hw',
-  bufferSizeFrames: 3,
+  bufferDelayMs: 100,
 });
 
 // Create MoQ source
@@ -42,6 +36,7 @@ const moqSource = createStandaloneMoQSource({
   namespace: 'live/stream',
   subscriptions: [
     { trackName: 'video', streamType: 'video' },
+    { trackName: 'audio', streamType: 'audio' },
   ],
 });
 
@@ -60,23 +55,6 @@ function render(timestamp) {
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
-```
-
-### Using with Elmo's MoQSession
-
-```typescript
-import { createPlayer } from '@stinkycomputing/web-live-player';
-import { MoQDiscoveryUtils } from '@elmo/core';
-
-// Find session from Elmo's node tree
-// MoQSessionNode implements IStreamSource directly
-const session = MoQDiscoveryUtils.findMoQSession(currentNode, 'my-session');
-
-// Create and configure player - session can be used directly as stream source
-const player = createPlayer();
-player.setStreamSource(session);
-player.setTrackFilter('video-track');
-player.play();
 ```
 
 ### Custom Stream Source
@@ -116,8 +94,11 @@ player.play();
 Creates a new player instance.
 
 **Config options:**
-- `preferredDecoder`: `'webcodecs-hw'` | `'webcodecs-sw'` | `'wasm'` - Decoder preference
-- `bufferSizeFrames`: `number` - Target buffer size (default: 3)
+- `preferredDecoder`: `'webcodecs-hw'` | `'webcodecs-sw'` | `'wasm'` - Decoder preference (default: `'webcodecs-sw'`). Note: WASM decoder only supports H.264 Baseline profile.
+- `bufferDelayMs`: `number` - Buffer delay in milliseconds (default: 100)
+- `enableAudio`: `boolean` - Enable audio playback (default: true)
+- `videoTrackName`: `string | null` - Video track name for MoQ streams (default: `'video'`)
+- `audioTrackName`: `string | null` - Audio track name for MoQ streams (default: `'audio'`)
 - `debugLogging`: `boolean` - Enable debug logging
 
 ### `LiveVideoPlayer`
@@ -127,10 +108,13 @@ Main player class.
 **Methods:**
 - `setStreamSource(source: IStreamSource)` - Set the stream data source
 - `setTrackFilter(trackName: string)` - Filter for specific track
+- `connectToMoQRelay(relayUrl, namespace, options?)` - Connect directly to a MoQ relay
 - `play()` - Start playback
 - `pause()` - Pause playback
 - `getVideoFrame(timestampMs: number)` - Get frame for current render timestamp
 - `getStats()` - Get playback statistics
+- `setVolume(volume: number)` - Set audio volume (0-1)
+- `setDebugLogging(enabled: boolean)` - Enable/disable debug logging at runtime
 - `dispose()` - Clean up resources
 
 **Events:**
@@ -209,6 +193,8 @@ function render(timestamp: number) {
 ```
 
 ### Handling YUV Frames (WASM Decoder)
+
+> **Note:** The WASM decoder only supports **H.264 Baseline profile**. For Main or High profile streams, use `'webcodecs-hw'` or `'webcodecs-sw'` instead.
 
 When using the WASM decoder, the library automatically converts YUV frames to `VideoFrame` objects using the browser's native I420 support. The GPU handles YUV→RGB conversion, so you can use the same rendering code regardless of decoder:
 
@@ -298,7 +284,6 @@ const player = createPlayer({
 Run the demo application:
 
 ```bash
-cd video-player
 npm install
 npm run dev
 ```
