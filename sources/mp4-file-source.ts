@@ -100,9 +100,179 @@ export class MP4FileSource {
   }
   
   /**
-   * Load an MP4 file from a URL
+   * Load an MP4 file from a URL using range-based loading for better performance
    */
   async loadFromUrl(url: string): Promise<MP4FileInfo> {
+    // Try to check if server supports range requests
+    const supportsRanges = await this.checkRangeSupport(url);
+    
+    if (supportsRanges) {
+      return this.loadFromUrlWithRanges(url);
+    } else {
+      // Fallback to full file download
+      return this.loadFromUrlFull(url);
+    }
+  }
+  
+  /**
+   * Check if server supports range requests
+   */
+  private async checkRangeSupport(url: string): Promise<boolean> {
+    try {
+      // Try a HEAD request first to check for Accept-Ranges header
+      const headResponse = await fetch(url, { method: 'HEAD' });
+      
+      if (headResponse.ok) {
+        const acceptRanges = headResponse.headers.get('Accept-Ranges');
+        const contentLength = headResponse.headers.get('Content-Length');
+        
+        if (contentLength) {
+          this.fileSize = parseInt(contentLength, 10);
+        }
+        
+        // Server supports ranges if Accept-Ranges is not 'none'
+        return acceptRanges !== null && acceptRanges !== 'none';
+      }
+    } catch (error) {
+      // HEAD might not be allowed, try a small range request
+      try {
+        const rangeResponse = await fetch(url, {
+          headers: { 'Range': 'bytes=0-0' }
+        });
+        
+        const contentRange = rangeResponse.headers.get('Content-Range');
+        if (contentRange) {
+          // Parse total size from Content-Range header (format: "bytes 0-0/12345")
+          const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+          if (match) {
+            this.fileSize = parseInt(match[1], 10);
+          }
+          return rangeResponse.status === 206; // Partial Content
+        }
+      } catch {
+        // Range requests not supported
+      }
+    }
+    
+    return false;
+  }
+  
+  /**
+   * Load file using HTTP Range requests (chunked loading)
+   */
+  private async loadFromUrlWithRanges(url: string): Promise<MP4FileInfo> {
+    this.initMP4File();
+    
+    // Chunk size for progressive loading (256KB is a good balance)
+    const CHUNK_SIZE = 256 * 1024;
+    let offset = 0;
+    let metadataResolved = false;
+    
+    return new Promise(async (resolve, reject) => {
+      // Override onReady to resolve early once metadata is available
+      const originalOnReady = this.mp4File!.onReady;
+      this.mp4File!.onReady = (info: Movie) => {
+        originalOnReady?.call(this.mp4File, info);
+        
+        if (this.fileInfo && !metadataResolved) {
+          metadataResolved = true;
+          // Continue loading in background
+          this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
+          resolve(this.fileInfo);
+        }
+      };
+      
+      try {
+        // Load chunks until we have metadata or reach end of file
+        while (offset < this.fileSize && !metadataResolved) {
+          const end = Math.min(offset + CHUNK_SIZE - 1, this.fileSize - 1);
+          
+          const response = await fetch(url, {
+            headers: {
+              'Range': `bytes=${offset}-${end}`
+            }
+          });
+          
+          if (!response.ok && response.status !== 206) {
+            throw new Error(`Failed to fetch chunk: ${response.status} ${response.statusText}`);
+          }
+          
+          const chunk = await response.arrayBuffer();
+          
+          // Create buffer with fileStart property for mp4box
+          const buffer = chunk as ArrayBuffer & { fileStart: number };
+          buffer.fileStart = offset;
+          
+          offset += chunk.byteLength;
+          this.loadedBytes = offset;
+          this.events.onProgress?.(this.loadedBytes, this.fileSize);
+          
+          this.mp4File?.appendBuffer(buffer);
+        }
+        
+        // If we loaded everything and still no metadata, something went wrong
+        if (!metadataResolved && offset >= this.fileSize) {
+          this.mp4File?.flush();
+          
+          if (this.fileInfo) {
+            resolve(this.fileInfo);
+          } else {
+            reject(new Error('File loaded but no video track found'));
+          }
+        }
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+  
+  /**
+   * Continue loading remaining chunks in background after initial metadata is ready
+   */
+  private continueLoadingInBackground(url: string, startOffset: number, chunkSize: number): void {
+    (async () => {
+      let offset = startOffset;
+      
+      try {
+        while (offset < this.fileSize) {
+          const end = Math.min(offset + chunkSize - 1, this.fileSize - 1);
+          
+          const response = await fetch(url, {
+            headers: {
+              'Range': `bytes=${offset}-${end}`
+            }
+          });
+          
+          if (!response.ok && response.status !== 206) {
+            this.events.onError?.(new Error(`Failed to fetch chunk: ${response.status}`));
+            break;
+          }
+          
+          const chunk = await response.arrayBuffer();
+          
+          const buffer = chunk as ArrayBuffer & { fileStart: number };
+          buffer.fileStart = offset;
+          
+          this.loadedBytes = offset + chunk.byteLength;
+          this.events.onProgress?.(this.loadedBytes, this.fileSize);
+          
+          this.mp4File?.appendBuffer(buffer);
+          
+          offset += chunk.byteLength;
+        }
+        
+        // Flush when complete
+        this.mp4File?.flush();
+      } catch (error) {
+        this.events.onError?.(error as Error);
+      }
+    })();
+  }
+  
+  /**
+   * Load entire file at once (fallback when range requests not supported)
+   */
+  private async loadFromUrlFull(url: string): Promise<MP4FileInfo> {
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
