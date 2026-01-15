@@ -62,6 +62,7 @@ export class MP4FileSource {
   private totalVideoSamples: number = 0;
   private totalAudioSamples: number = 0;
   private samplesRequested: boolean = false;
+  private isProgressiveLoading: boolean = false;
   
   // File loading state
   private fileSize: number = 0;
@@ -163,8 +164,11 @@ export class MP4FileSource {
   private loadFromUrlWithRanges(url: string): Promise<MP4FileInfo> {
     this.initMP4File();
     
-    // Chunk size for progressive loading (256KB is a good balance)
-    const CHUNK_SIZE = 256 * 1024;
+    // Mark as progressive loading for proper sample extraction
+    this.isProgressiveLoading = true;
+    
+    // Chunk size for progressive loading (1MB for better performance)
+    const CHUNK_SIZE = 1024 * 1024;
     let offset = 0;
     let metadataResolved = false;
     
@@ -513,8 +517,9 @@ export class MP4FileSource {
       this.fileInfo.audioSampleRate = this.audioTrack.audio?.sample_rate;
     }
     
-    // Start demuxing IMMEDIATELY in onReady (like reference implementation)
-    // This must happen before any more data is appended
+    // Note: We call requestSamples here which starts extraction.
+    // For range-based loading, mp4box will continue extracting samples
+    // as more data is appended via appendBuffer() in the background.
     this.requestSamples();
     
     this.events.onReady?.(this.fileInfo);
@@ -528,16 +533,31 @@ export class MP4FileSource {
     this.samplesRequested = true;
 
     if (this.videoTrackId !== null) {
-      // Request ALL samples at once (like the reference implementation)
-      this.mp4File?.setExtractionOptions(this.videoTrackId, null, {
-        nbSamples: this.totalVideoSamples,
-      });
+      if (this.isProgressiveLoading) {
+        // For progressive loading, don't limit samples - extract as they become available
+        this.mp4File?.setExtractionOptions(this.videoTrackId, null, {
+          nbSamples: Infinity,
+        });
+      } else {
+        // For full file loading, request all samples at once
+        this.mp4File?.setExtractionOptions(this.videoTrackId, null, {
+          nbSamples: this.totalVideoSamples,
+        });
+      }
     }
 
     if (this.audioTrackId !== null) {
-      this.mp4File?.setExtractionOptions(this.audioTrackId, null, {
-        nbSamples: this.totalAudioSamples,
-      });
+      if (this.isProgressiveLoading) {
+        // For progressive loading, don't limit samples - extract as they become available
+        this.mp4File?.setExtractionOptions(this.audioTrackId, null, {
+          nbSamples: Infinity,
+        });
+      } else {
+        // For full file loading, request all samples at once
+        this.mp4File?.setExtractionOptions(this.audioTrackId, null, {
+          nbSamples: this.totalAudioSamples,
+        });
+      }
     }
 
     this.mp4File?.start();
@@ -656,6 +676,8 @@ export class MP4FileSource {
     this.videoTrack = null;
     this.audioTrack = null;
     this.videoDescription = null;
+    this.audioDescription = null;
+    this.isProgressiveLoading = false;
   }
   
   /**

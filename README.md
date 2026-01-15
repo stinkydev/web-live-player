@@ -136,8 +136,8 @@ filePlayer.on('progress', (loaded, total) => {
 });
 ```
 
-**Optimized Loading**: The file player uses HTTP Range requests to load large files in chunks (256KB each). This means:
-- Playback starts as soon as metadata is available (~1MB typically)
+**Optimized Loading**: The file player uses HTTP Range requests to load large files in chunks (1MB each). This means:
+- Playback starts as soon as metadata is available (~1-2MB typically)
 - Remaining file loads in the background during playback
 - 10-30x faster time-to-first-frame for large files
 - Automatic fallback to full download if server doesn't support ranges

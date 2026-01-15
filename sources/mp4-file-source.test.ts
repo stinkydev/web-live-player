@@ -138,11 +138,11 @@ describe('MP4FileSource', () => {
   });
   
   describe('Chunk Size', () => {
-    it('should use 256KB chunk size for range requests', () => {
+    it('should use 1MB chunk size for range requests', () => {
       // This is a documentation test - the actual chunk size is defined in the implementation
-      // and should be 256KB (256 * 1024 bytes) for optimal performance
-      const expectedChunkSize = 256 * 1024;
-      expect(expectedChunkSize).toBe(262144);
+      // and should be 1MB (1024 * 1024 bytes) for optimal performance
+      const expectedChunkSize = 1024 * 1024;
+      expect(expectedChunkSize).toBe(1048576);
     });
   });
   
