@@ -1,6 +1,6 @@
 {
   "name": "@stinkycomputing/web-live-player",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A Player library for Sesame video streams using WebCodecs and MoQ",
   "type": "module",
   "main": "./dist/web-live-player.cjs",
