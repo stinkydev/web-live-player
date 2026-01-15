@@ -292,6 +292,9 @@ export class MP4FileSource {
     const arrayBuffer = await response.arrayBuffer();
     this.fileSize = arrayBuffer.byteLength;
     
+    // Not progressive loading - all data is available
+    this.isProgressiveLoading = false;
+    
     return this.loadFromArrayBuffer(arrayBuffer);
   }
   
@@ -301,6 +304,10 @@ export class MP4FileSource {
   async loadFromFile(file: File): Promise<MP4FileInfo> {
     this.fileSize = file.size;
     const arrayBuffer = await file.arrayBuffer();
+    
+    // Not progressive loading - all data is available
+    this.isProgressiveLoading = false;
+    
     return this.loadFromArrayBuffer(arrayBuffer);
   }
   
@@ -311,6 +318,9 @@ export class MP4FileSource {
   //@ts-ignore
   private async loadFromStream(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<MP4FileInfo> {
     this.initMP4File();
+    
+    // Mark as progressive loading for proper sample extraction
+    this.isProgressiveLoading = true;
     
     let offset = 0;
     
