@@ -101,78 +101,42 @@ export class MP4FileSource {
   }
   
   /**
-   * Load an MP4 file from a URL using range-based loading for better performance
+   * Load an MP4 file from a URL using range-based loading for better performance.
+   * Automatically falls back to full download if server doesn't support ranges.
    */
   async loadFromUrl(url: string): Promise<MP4FileInfo> {
-    // Try to check if server supports range requests
-    const supportsRanges = await this.checkRangeSupport(url);
-    
-    if (supportsRanges) {
-      return this.loadFromUrlWithRanges(url);
-    } else {
-      // Fallback to full file download
-      return this.loadFromUrlFull(url);
-    }
-  }
-  
-  /**
-   * Check if server supports range requests
-   */
-  private async checkRangeSupport(url: string): Promise<boolean> {
-    try {
-      // Try a HEAD request first to check for Accept-Ranges header
-      const headResponse = await fetch(url, { method: 'HEAD' });
-      
-      if (headResponse.ok) {
-        const acceptRanges = headResponse.headers.get('Accept-Ranges');
-        const contentLength = headResponse.headers.get('Content-Length');
-        
-        if (contentLength) {
-          this.fileSize = parseInt(contentLength, 10);
-        }
-        
-        // Server supports ranges if Accept-Ranges is not 'none'
-        return acceptRanges !== null && acceptRanges !== 'none';
-      }
-    } catch (error) {
-      // HEAD might not be allowed, try a small range request
-      try {
-        const rangeResponse = await fetch(url, {
-          headers: { 'Range': 'bytes=0-0' }
-        });
-        
-        const contentRange = rangeResponse.headers.get('Content-Range');
-        if (contentRange) {
-          // Parse total size from Content-Range header (format: "bytes 0-0/12345")
-          const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
-          if (match) {
-            this.fileSize = parseInt(match[1], 10);
-          }
-          return rangeResponse.status === 206; // Partial Content
-        }
-      } catch {
-        // Range requests not supported
-      }
-    }
-    
-    return false;
-  }
-  
-  /**
-   * Load file using HTTP Range requests (chunked loading)
-   */
-  private loadFromUrlWithRanges(url: string): Promise<MP4FileInfo> {
     this.initMP4File();
     
-    // Mark as progressive loading for proper sample extraction
-    this.isProgressiveLoading = true;
-    
-    // Chunk size for progressive loading (1MB for better performance)
-    const CHUNK_SIZE = 1024 * 1024;
+    // Chunk size for progressive loading (4MB)
+    const CHUNK_SIZE = 4 * 1024 * 1024;
     let offset = 0;
     let metadataResolved = false;
     
+    // Try to get file size first (needed for progress tracking and loop termination)
+    try {
+      const headResponse = await fetch(url, { method: 'HEAD' });
+      if (headResponse.ok) {
+        const contentLength = headResponse.headers.get('Content-Length');
+        if (contentLength) {
+          this.fileSize = parseInt(contentLength, 10);
+        }
+      }
+    } catch {
+      // HEAD failed, will get size from Content-Range or full response
+    }
+    
     return new Promise((resolve, reject) => {
+      let samplesReceived = false;
+      
+      // Track when we receive first samples
+      const originalOnSamples = this.mp4File!.onSamples;
+      this.mp4File!.onSamples = (trackId: number, user: unknown, samples: Sample[]) => {
+        if (!samplesReceived && trackId === this.videoTrackId && samples.length > 0) {
+          samplesReceived = true;
+        }
+        originalOnSamples?.call(this.mp4File, trackId, user, samples);
+      };
+      
       // Override onReady to resolve early once metadata is available
       const originalOnReady = this.mp4File!.onReady;
       this.mp4File!.onReady = (info: Movie) => {
@@ -180,23 +144,85 @@ export class MP4FileSource {
         
         if (this.fileInfo && !metadataResolved) {
           metadataResolved = true;
-          // Continue loading in background
-          this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
-          resolve(this.fileInfo);
         }
       };
       
       // Async loading function
       const loadChunks = async () => {
         try {
-          // Load chunks until we have metadata or reach end of file
-          while (offset < this.fileSize && !metadataResolved) {
+          // First request - try with Range header to detect support
+          const firstResponse = await fetch(url, {
+            headers: { 'Range': `bytes=0-${CHUNK_SIZE - 1}` }
+          });
+          
+          if (!firstResponse.ok && firstResponse.status !== 206) {
+            throw new Error(`Failed to fetch: ${firstResponse.status} ${firstResponse.statusText}`);
+          }
+          
+          // Check if server returned partial content (206) or full file (200)
+          if (firstResponse.status === 200) {
+            // Server doesn't support ranges - we got the whole file
+            this.isProgressiveLoading = false;
+            
+            const arrayBuffer = await firstResponse.arrayBuffer();
+            this.fileSize = arrayBuffer.byteLength;
+            this.loadedBytes = arrayBuffer.byteLength;
+            
+            const buffer = arrayBuffer as ArrayBuffer & { fileStart: number };
+            buffer.fileStart = 0;
+            
+            this.mp4File?.appendBuffer(buffer);
+            this.mp4File?.flush();
+            
+            if (this.fileInfo) {
+              resolve(this.fileInfo);
+            } else {
+              reject(new Error('File loaded but no video track found'));
+            }
+            return;
+          }
+          
+          // Server supports ranges (206 Partial Content)
+          this.isProgressiveLoading = true;
+          
+          // Try to get file size from Content-Range header if we don't have it yet
+          if (!this.fileSize) {
+            const contentRange = firstResponse.headers.get('Content-Range');
+            if (contentRange) {
+              const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+              if (match) {
+                this.fileSize = parseInt(match[1], 10);
+              }
+            }
+          }
+          
+          // Process first chunk
+          const firstChunk = await firstResponse.arrayBuffer();
+          const firstBuffer = firstChunk as ArrayBuffer & { fileStart: number };
+          firstBuffer.fileStart = 0;
+          offset = firstChunk.byteLength;
+          this.loadedBytes = offset;
+          this.events.onProgress?.(this.loadedBytes, this.fileSize);
+          this.mp4File?.appendBuffer(firstBuffer);
+          
+          // Check if first chunk already gave us metadata and samples
+          if (metadataResolved && samplesReceived) {
+            // Only start background loading if there's more to load
+            if (offset < this.fileSize) {
+              this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
+            } else {
+              this.mp4File?.flush();
+            }
+            resolve(this.fileInfo!);
+            return;
+          }
+          
+          // Continue loading chunks until we have metadata AND samples
+          while (offset < this.fileSize && (!metadataResolved || !samplesReceived)) {
             const end = Math.min(offset + CHUNK_SIZE - 1, this.fileSize - 1);
             
             const response = await fetch(url, {
-              headers: {
-                'Range': `bytes=${offset}-${end}`
-              }
+              headers: { 'Range': `bytes=${offset}-${end}` }
             });
             
             if (!response.ok && response.status !== 206) {
@@ -204,21 +230,25 @@ export class MP4FileSource {
             }
             
             const chunk = await response.arrayBuffer();
-            
-            // Create buffer with fileStart property for mp4box
             const buffer = chunk as ArrayBuffer & { fileStart: number };
             buffer.fileStart = offset;
             
-            // Update offset and loaded bytes consistently
             offset += chunk.byteLength;
             this.loadedBytes = offset;
             this.events.onProgress?.(this.loadedBytes, this.fileSize);
             
             this.mp4File?.appendBuffer(buffer);
+            
+            // If we have metadata and samples, we can resolve
+            if (metadataResolved && samplesReceived) {
+              this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
+              resolve(this.fileInfo!);
+              return;
+            }
           }
           
-          // If we loaded everything and still no metadata, something went wrong
-          if (!metadataResolved && offset >= this.fileSize) {
+          // Loaded everything
+          if (offset >= this.fileSize) {
             this.mp4File?.flush();
             
             if (this.fileInfo) {
@@ -232,7 +262,6 @@ export class MP4FileSource {
         }
       };
       
-      // Start loading
       loadChunks();
     });
   }
@@ -278,24 +307,6 @@ export class MP4FileSource {
         this.events.onError?.(error as Error);
       }
     })();
-  }
-  
-  /**
-   * Load entire file at once (fallback when range requests not supported)
-   */
-  private async loadFromUrlFull(url: string): Promise<MP4FileInfo> {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    this.fileSize = arrayBuffer.byteLength;
-    
-    // Not progressive loading - all data is available
-    this.isProgressiveLoading = false;
-    
-    return this.loadFromArrayBuffer(arrayBuffer);
   }
   
   /**
@@ -544,9 +555,10 @@ export class MP4FileSource {
 
     if (this.videoTrackId !== null) {
       if (this.isProgressiveLoading) {
-        // For progressive loading, don't limit samples - extract as they become available
+        // For progressive loading, use small batches so samples are emitted as data arrives
+        // This allows playback to start before the entire file is loaded
         this.mp4File?.setExtractionOptions(this.videoTrackId, null, {
-          nbSamples: Infinity,
+          nbSamples: 100,
         });
       } else {
         // For full file loading, request all samples at once
@@ -558,9 +570,9 @@ export class MP4FileSource {
 
     if (this.audioTrackId !== null) {
       if (this.isProgressiveLoading) {
-        // For progressive loading, don't limit samples - extract as they become available
+        // For progressive loading, use small batches
         this.mp4File?.setExtractionOptions(this.audioTrackId, null, {
-          nbSamples: Infinity,
+          nbSamples: 100,
         });
       } else {
         // For full file loading, request all samples at once
@@ -583,13 +595,7 @@ export class MP4FileSource {
     if (!track) return;
     
     const decodableSamples: DecodableSample[] = samples
-      .filter(sample => {
-        if (!sample.data) {
-          console.warn(`[MP4FileSource] Sample ${sample.number} has no data`);
-          return false;
-        }
-        return true;
-      })
+      .filter(sample => sample.data != null)
       .map(sample => {
         // Convert sample time to microseconds
         const timestampUs = (sample.cts / sample.timescale) * 1_000_000;
