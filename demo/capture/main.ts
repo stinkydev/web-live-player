@@ -137,24 +137,6 @@ function getAudioCodecType(): CodecType {
   }
 }
 
-// Get codec string for WebCodecs
-function getVideoCodecString(): string {
-  switch (videoCodecSelect.value) {
-    case 'vp8': return 'vp8';
-    case 'vp9': return 'vp09.00.10.08';
-    case 'avc':
-    default: return 'avc1.42E01F';
-  }
-}
-
-function getAudioCodecString(): string {
-  switch (audioCodecSelect.value) {
-    case 'aac': return 'mp4a.40.2';
-    case 'opus':
-    default: return 'opus';
-  }
-}
-
 // Enumerate media devices
 async function enumerateDevices() {
   try {
@@ -197,9 +179,12 @@ function createSink(): ICaptureSink {
       reconnectionDelay: 3000,
     });
   } else {
+    // WebSocket sink - streamId can be appended to URL if needed
+    const baseUrl = wsUrlInput.value;
+    const streamId = wsStreamIdInput.value;
+    const url = streamId ? `${baseUrl}?streamId=${streamId}` : baseUrl;
     return new WebSocketCaptureSink({
-      url: wsUrlInput.value,
-      streamId: wsStreamIdInput.value,
+      url,
       autoReconnect: true,
       reconnectDelay: 3000,
     });
@@ -222,22 +207,31 @@ async function startCapture() {
     const config: MediaCaptureConfig = {
       sink,
       video: {
-        codec: getVideoCodecString(),
-        codecType: getVideoCodecType(),
+        width: { ideal: width },
+        height: { ideal: height },
+        frameRate: { ideal: parseInt(frameRateSelect.value) },
+        deviceId: videoDeviceSelect.value || undefined,
+      },
+      audio: {
+        sampleRate: { ideal: 48000 },
+        channelCount: { ideal: 2 },
+        deviceId: audioDeviceSelect.value || undefined,
+      },
+      videoEncoder: {
+        codec: getVideoCodecType(),
         width,
         height,
         frameRate: parseInt(frameRateSelect.value),
         bitrate: parseInt(videoBitrateInput.value) * 1000,
-        keyframeInterval: parseInt(keyframeIntervalInput.value),
-        deviceId: videoDeviceSelect.value || undefined,
+        keyFrameInterval: parseInt(keyframeIntervalInput.value),
+        latencyMode: 'realtime',
       },
-      audio: {
-        codec: getAudioCodecString(),
-        codecType: getAudioCodecType(),
+      audioEncoder: {
+        codec: getAudioCodecType(),
         sampleRate: 48000,
         channels: 2,
         bitrate: parseInt(audioBitrateInput.value) * 1000,
-        deviceId: audioDeviceSelect.value || undefined,
+        latencyMode: 'realtime',
       },
     };
     
@@ -245,7 +239,7 @@ async function startCapture() {
     capture = new MediaCapture(config);
     
     // Setup event handlers
-    capture.on('stateChange', (state: CaptureState) => {
+    capture.on('state-change', (state: CaptureState) => {
       log(`State: ${state}`);
       statState.textContent = state;
       
@@ -253,8 +247,8 @@ async function startCapture() {
         case 'capturing':
           setStatus('streaming', 'Streaming');
           break;
-        case 'ready':
-          setStatus('ready', 'Ready');
+        case 'initializing':
+          setStatus('ready', 'Initializing');
           break;
         case 'error':
           setStatus('error', 'Error');
@@ -264,9 +258,10 @@ async function startCapture() {
       }
     });
     
-    capture.on('audioLevel', (level: number) => {
-      // Update VU meter (level is 0-1)
-      vuMeter.style.width = `${Math.min(level * 100, 100)}%`;
+    capture.on('audio-levels', (event) => {
+      // Update VU meter (level is 0-1, use max of all channels)
+      const maxLevel = Math.max(...event.levels);
+      vuMeter.style.width = `${Math.min(maxLevel * 100, 100)}%`;
     });
     
     capture.on('error', (error: Error) => {
@@ -288,8 +283,8 @@ async function startCapture() {
     audioCodecBadge.textContent = `Audio: ${audioCodecSelect.options[audioCodecSelect.selectedIndex].text}`;
     
     // Update UI
-    btnStartCapture.disabled = true;
-    btnStopCapture.disabled = false;
+    (btnStartCapture as HTMLButtonElement).disabled = true;
+    (btnStopCapture as HTMLButtonElement).disabled = false;
     startTime = Date.now();
     
     // Start stats update
@@ -326,8 +321,8 @@ async function stopCapture() {
   codecInfo.style.display = 'none';
   vuMeter.style.width = '0%';
   
-  btnStartCapture.disabled = false;
-  btnStopCapture.disabled = true;
+  (btnStartCapture as HTMLButtonElement).disabled = false;
+  (btnStopCapture as HTMLButtonElement).disabled = true;
   
   setStatus('idle', 'Idle');
   log('Capture stopped');
@@ -342,26 +337,24 @@ function updateStats() {
   // Duration
   statDuration.textContent = formatDuration(Date.now() - startTime);
   
-  // Resolution
-  if (stats.videoWidth && stats.videoHeight) {
-    statResolution.textContent = `${stats.videoWidth}x${stats.videoHeight}`;
-  }
+  // Resolution from config (not from stats)
+  const [width, height] = resolutionSelect.value.split('x').map(Number);
+  statResolution.textContent = `${width}x${height}`;
   
   // Frame counts
-  statVideoFrames.textContent = stats.videoFramesSent?.toString() ?? '0';
-  statAudioFrames.textContent = stats.audioFramesSent?.toString() ?? '0';
+  statVideoFrames.textContent = stats.videoFramesEncoded.toString();
+  statAudioFrames.textContent = stats.audioFramesEncoded.toString();
   
   // Bitrates
-  if (stats.videoBytesPerSecond) {
-    statVideoBitrate.textContent = `${((stats.videoBytesPerSecond * 8) / 1000).toFixed(0)} kbps`;
+  if (stats.videoBitrate) {
+    statVideoBitrate.textContent = `${(stats.videoBitrate / 1000).toFixed(0)} kbps`;
   }
-  if (stats.audioBytesPerSecond) {
-    statAudioBitrate.textContent = `${((stats.audioBytesPerSecond * 8) / 1000).toFixed(0)} kbps`;
+  if (stats.audioBitrate) {
+    statAudioBitrate.textContent = `${(stats.audioBitrate / 1000).toFixed(0)} kbps`;
   }
   
   // Total bytes sent
-  const totalBytes = (stats.videoBytesSent ?? 0) + (stats.audioBytesSent ?? 0);
-  statBytesSent.textContent = formatBytes(totalBytes);
+  statBytesSent.textContent = formatBytes(stats.bytesSent);
 }
 
 // Event listeners
