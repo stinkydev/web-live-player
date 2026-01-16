@@ -21,6 +21,7 @@ export interface MP4FileInfo {
   bitrate?: number;       // Video bitrate
   audioChannels?: number; // Number of audio channels
   audioSampleRate?: number; // Audio sample rate
+  isMoovAtStart?: boolean; // True if moov atom is at the start (progressive-friendly)
 }
 
 /**
@@ -530,6 +531,7 @@ export class MP4FileSource {
       videoCodec: this.videoTrack.codec,
       frameRate: this.videoTrack.nb_samples / (this.videoTrack.duration / this.videoTrack.timescale),
       bitrate: this.videoTrack.bitrate,
+      isMoovAtStart: (this.mp4File as any)?.isProgressive ?? undefined,
     };
     
     if (this.audioTrack) {

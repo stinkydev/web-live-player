@@ -46,10 +46,29 @@ export interface SchedulerStatus {
   latency: LatencyStats | null;
 }
 
+/**
+ * Packet timing entry for visualization
+ */
+export interface PacketTimingEntry {
+  /** Time packet arrived (performance.now()) */
+  arrivalTime: number;
+  /** Time since previous packet (ms) */
+  intervalMs: number;
+  /** Stream timestamp (us) */
+  streamTimestampUs: number;
+  /** Whether this was a keyframe */
+  isKeyframe: boolean;
+  /** Decode latency (ms) */
+  decodeLatencyMs: number;
+  /** Whether frame was dropped */
+  wasDropped: boolean;
+}
+
 interface QueuedFrame<T> {
   frame: T;
   timestamp: number; // stream timestamp in microseconds
   timing: FrameTiming;
+  isKeyframe?: boolean;
 }
 
 export interface SchedulerConfig<T> {
@@ -99,6 +118,11 @@ export class FrameScheduler<T> {
   private latencyHistory: { decode: number; buffer: number; total: number }[] = [];
   private latencyHistorySize: number = 60; // About 1 second at 60fps
   
+  // Packet timing history for visualization
+  private packetTimingHistory: PacketTimingEntry[] = [];
+  private packetTimingHistorySize: number = 300; // ~5 seconds at 60fps
+  private lastPacketArrivalTime: number | null = null;
+
   // Statistics
   private stats = {
     dropped: 0,
@@ -134,8 +158,30 @@ export class FrameScheduler<T> {
   }
   
   /** Enqueue a decoded frame with timing information */
-  enqueue(frame: T, timestampUs: number, timing: FrameTiming): void {
+  enqueue(frame: T, timestampUs: number, timing: FrameTiming, isKeyframe: boolean = false): void {
     this.stats.enqueued++;
+    
+    // Record packet timing for visualization
+    const intervalMs = this.lastPacketArrivalTime !== null
+      ? timing.arrivalTime - this.lastPacketArrivalTime
+      : 0;
+    this.lastPacketArrivalTime = timing.arrivalTime;
+    
+    const decodeLatencyMs = timing.decodeTime - timing.arrivalTime;
+    
+    this.packetTimingHistory.push({
+      arrivalTime: timing.arrivalTime,
+      intervalMs,
+      streamTimestampUs: timestampUs,
+      isKeyframe,
+      decodeLatencyMs,
+      wasDropped: false,
+    });
+    
+    // Trim history
+    while (this.packetTimingHistory.length > this.packetTimingHistorySize) {
+      this.packetTimingHistory.shift();
+    }
     
     // Update frame duration estimate
     if (this.lastFrameTimestamp !== null) {
@@ -291,6 +337,14 @@ export class FrameScheduler<T> {
       const dropped = this.buffer.shift()!;
       this.stats.dropped++;
       this.onFrameDropped?.(dropped.frame, reason);
+      
+      // Mark corresponding packet timing entry as dropped
+      const timingEntry = this.packetTimingHistory.find(
+        e => e.streamTimestampUs === dropped.timestamp
+      );
+      if (timingEntry) {
+        timingEntry.wasDropped = true;
+      }
     }
   }
   
@@ -390,5 +444,10 @@ export class FrameScheduler<T> {
   resetStats(): void {
     this.stats = { dropped: 0, enqueued: 0, dequeued: 0, driftCorrections: 0 };
     this.bufferSizeHistory = [];
+  }
+  
+  /** Get packet timing history for visualization */
+  getPacketTimingHistory(): PacketTimingEntry[] {
+    return [...this.packetTimingHistory];
   }
 }

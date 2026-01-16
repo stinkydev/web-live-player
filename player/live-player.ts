@@ -35,6 +35,15 @@ export interface PlayerConfig {
 export type PlayerState = 'idle' | 'playing' | 'paused' | 'error';
 
 /**
+ * Bandwidth statistics
+ */
+export interface BandwidthStats {
+  videoBytesPerSecond: number;
+  audioBytesPerSecond: number;
+  totalBytesPerSecond: number;
+}
+
+/**
  * Player statistics
  */
 export interface PlayerStats {
@@ -49,6 +58,7 @@ export interface PlayerStats {
   streamHeight: number;
   frameRate: number;
   latency: LatencyStats | null;
+  bandwidth: BandwidthStats | null;
 }
 
 /**
@@ -110,6 +120,20 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   
   // Timing tracking: maps frame timestamp to arrival time
   private arrivalTimes: Map<number, number> = new Map();
+  // Track keyframe status per timestamp
+  private keyframeStatus: Map<number, boolean> = new Map();
+  
+  // Bandwidth tracking
+  private videoBytesReceived: number = 0;
+  private audioBytesReceived: number = 0;
+  private lastBandwidthUpdateTime: number = 0;
+  private lastVideoBytesReceived: number = 0;
+  private lastAudioBytesReceived: number = 0;
+  private currentBandwidth: BandwidthStats = {
+    videoBytesPerSecond: 0,
+    audioBytesPerSecond: 0,
+    totalBytesPerSecond: 0,
+  };
   
   constructor(config: PlayerConfig = {}) {
     super('idle', config.debugLogging ?? false);
@@ -422,6 +446,9 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   getStats(): PlayerStats {
     const schedulerStatus = this.frameScheduler.getStatus();
     
+    // Update bandwidth calculation
+    this.updateBandwidthStats();
+    
     return {
       bufferSize: schedulerStatus.currentBufferSize,
       bufferMs: schedulerStatus.currentBufferMs,
@@ -434,7 +461,42 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       streamHeight: this.streamHeight,
       frameRate: this.estimatedFrameRate,
       latency: schedulerStatus.latency,
+      bandwidth: this.currentBandwidth,
     };
+  }
+  
+  /**
+   * Update bandwidth statistics
+   */
+  private updateBandwidthStats(): void {
+    const now = performance.now();
+    const elapsed = now - this.lastBandwidthUpdateTime;
+    
+    // Update every 500ms minimum to avoid jittery stats
+    if (elapsed < 500) {
+      return;
+    }
+    
+    const elapsedSeconds = elapsed / 1000;
+    const videoBytesDelta = this.videoBytesReceived - this.lastVideoBytesReceived;
+    const audioBytesDelta = this.audioBytesReceived - this.lastAudioBytesReceived;
+    
+    this.currentBandwidth = {
+      videoBytesPerSecond: videoBytesDelta / elapsedSeconds,
+      audioBytesPerSecond: audioBytesDelta / elapsedSeconds,
+      totalBytesPerSecond: (videoBytesDelta + audioBytesDelta) / elapsedSeconds,
+    };
+    
+    this.lastBandwidthUpdateTime = now;
+    this.lastVideoBytesReceived = this.videoBytesReceived;
+    this.lastAudioBytesReceived = this.audioBytesReceived;
+  }
+  
+  /**
+   * Get packet timing history for visualization/debugging
+   */
+  getPacketTimingHistory() {
+    return this.frameScheduler.getPacketTimingHistory();
   }
   
   /**
@@ -461,10 +523,16 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       return;
     }
     
+    // Track bandwidth - count payload bytes
+    const payloadBytes = data.payload_size || 0;
+    
     // Route audio to handler - audio may come on separate "audio" track (MoQ)
     // or on the same connection as video (WebSocket)
     const isAudioPacket = data.header.type === PacketType.AUDIO_FRAME || event.streamType === 'audio';
     if (isAudioPacket) {
+      // Track audio bandwidth
+      this.audioBytesReceived += payloadBytes;
+      
       // For MoQ: audio comes on a separate track (e.g., "audio")
       // For WebSocket: audio comes on the same track as video (e.g., "default")
       // Only filter by audioTrackName if it's explicitly set AND matches a track-based pattern
@@ -479,6 +547,9 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       await this.handleAudioData(data);
       return;
     }
+    
+    // Track video bandwidth
+    this.videoBytesReceived += payloadBytes;
     
     // Filter by track name for video if set (trackFilter overrides config)
     const videoTrack = this.trackFilter ?? this.config.videoTrackName;
@@ -577,12 +648,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       const microsecondTimebase = { num: 1, den: 1000000 };
       const timestampUs = rescaleTime(data.header!.pts, sourceTimebase, microsecondTimebase);
       this.arrivalTimes.set(timestampUs, arrivalTime);
+      this.keyframeStatus.set(timestampUs, isKeyframe);
       
       // Clean up old entries (keep last 100)
       if (this.arrivalTimes.size > 100) {
         const entries = [...this.arrivalTimes.entries()];
         for (let i = 0; i < entries.length - 100; i++) {
           this.arrivalTimes.delete(entries[i][0]);
+          this.keyframeStatus.delete(entries[i][0]);
         }
       }
       
@@ -717,13 +790,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private handleDecodedFrame(frame: VideoFrame): void {
     const decodeTime = performance.now();
     const arrivalTime = this.arrivalTimes.get(frame.timestamp) ?? decodeTime;
+    const isKeyframe = this.keyframeStatus.get(frame.timestamp) ?? false;
     
     const timing: FrameTiming = {
       arrivalTime,
       decodeTime,
     };
     
-    this.frameScheduler.enqueue(frame, frame.timestamp, timing);
+    this.frameScheduler.enqueue(frame, frame.timestamp, timing, isKeyframe);
     this.emit('frame', frame);
   }
   
@@ -734,6 +808,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private handleDecodedYUVFrame(yuvFrame: YUVFrame): void {
     const decodeTime = performance.now();
     const arrivalTime = this.arrivalTimes.get(yuvFrame.timestamp) ?? decodeTime;
+    const isKeyframe = this.keyframeStatus.get(yuvFrame.timestamp) ?? false;
     
     // Pass actual video dimensions for visible rect (decoder may output padded dimensions)
     const videoFrame = this.convertYUVToVideoFrame(yuvFrame, this.streamWidth, this.streamHeight);
@@ -743,7 +818,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         decodeTime,
       };
       
-      this.frameScheduler.enqueue(videoFrame, yuvFrame.timestamp, timing);
+      this.frameScheduler.enqueue(videoFrame, yuvFrame.timestamp, timing, isKeyframe);
       this.emit('frame', videoFrame);
     }
   }

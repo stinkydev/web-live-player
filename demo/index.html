@@ -186,6 +186,53 @@
     .log-entry.error { color: #f85149; }
     .log-entry.debug { color: #8b949e; }
     
+    /* Timing graph styles */
+    .timing-graph-container {
+      background: #0d1117;
+      border-radius: 4px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    
+    #timingCanvas {
+      width: 100%;
+      height: 150px;
+      display: block;
+    }
+    
+    .timing-legend {
+      display: flex;
+      gap: 15px;
+      font-size: 0.8rem;
+      color: #888;
+      margin-bottom: 8px;
+    }
+    
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    
+    .legend-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
+    
+    .legend-color.normal { background: #4ecdc4; }
+    .legend-color.dropped { background: #e74c3c; }
+    .legend-color.keyframe { background: #f39c12; }
+    .legend-color.late { background: #9b59b6; }
+    
+    .timing-stats {
+      display: flex;
+      gap: 20px;
+      font-size: 0.85rem;
+      color: #aaa;
+      font-family: monospace;
+    }
+
     .row {
       display: grid;
       grid-template-columns: 1fr 350px;
@@ -251,12 +298,15 @@
       width: 100vw;
       height: 100vh;
       background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
     }
     
     .video-container:fullscreen #videoCanvas,
     .video-container:-webkit-full-screen #videoCanvas {
-      width: 100%;
-      height: 100%;
+      width: auto;
+      height: auto;
     }
     
     .fullscreen-btn {
@@ -337,6 +387,33 @@
               <div class="stat-value" id="statTotal">0</div>
               <div class="stat-label">Total Frames</div>
             </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statVideoBandwidth">-</div>
+              <div class="stat-label">Video Bandwidth</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statAudioBandwidth">-</div>
+              <div class="stat-label">Audio Bandwidth</div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Packet Timing Graph -->
+        <div class="panel">
+          <h2>Packet Timing</h2>
+          <div class="timing-graph-container">
+            <canvas id="timingCanvas" width="800" height="200"></canvas>
+          </div>
+          <div class="timing-legend">
+            <span class="legend-item"><span class="legend-color normal"></span> Normal</span>
+            <span class="legend-item"><span class="legend-color dropped"></span> Dropped</span>
+            <span class="legend-item"><span class="legend-color keyframe"></span> Keyframe</span>
+            <span class="legend-item"><span class="legend-color late"></span> Late (&gt;50ms)</span>
+          </div>
+          <div class="timing-stats">
+            <span id="timingAvgInterval">Avg: -ms</span>
+            <span id="timingMaxInterval">Max: -ms</span>
+            <span id="timingJitter">Jitter: -ms</span>
           </div>
         </div>
       </div>

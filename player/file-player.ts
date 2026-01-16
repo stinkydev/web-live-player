@@ -407,7 +407,11 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
             resolve();
           } else {
             this.bufferReadyResolve = null;
-            reject(new Error('Timeout waiting for frames to decode'));
+            // Check if moov atom is not at the start of the file
+            const moovWarning = this.fileInfo?.isMoovAtStart === false 
+              ? ' The moov atom is not at the start of the file - please re-encode with "faststart" option (e.g., ffmpeg -movflags +faststart).'
+              : '';
+            reject(new Error(`Timeout waiting for frames to decode.${moovWarning}`));
           }
         }
       }, 5000);

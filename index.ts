@@ -17,7 +17,7 @@ export { BasePlayer } from './player/base-player';
 export type { BasePlayerConfig } from './player/base-player';
 
 export { LiveVideoPlayer, createPlayer } from './player/live-player';
-export type { PlayerConfig, PlayerStats, PlayerState } from './player/live-player';
+export type { PlayerConfig, PlayerStats, PlayerState, BandwidthStats } from './player/live-player';
 
 export { FileVideoPlayer, createFilePlayer } from './player/file-player';
 export type { FilePlayerConfig, FilePlayerState, FilePlayerStats, FilePlayMode } from './player/file-player';
@@ -46,7 +46,7 @@ export type { LiveAudioConfig } from './audio/live-audio-player';
 
 // Utilities
 export { FrameScheduler } from './scheduling/frame-scheduler';
-export type { FrameTiming, LatencyStats, SchedulerStatus, SchedulerConfig } from './scheduling/frame-scheduler';
+export type { FrameTiming, LatencyStats, SchedulerStatus, SchedulerConfig, PacketTimingEntry } from './scheduling/frame-scheduler';
 
 // Protocol
 export { SesameBinaryProtocol } from './protocol/sesame-binary-protocol';

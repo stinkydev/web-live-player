@@ -10,6 +10,7 @@ import {
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
+  PacketTimingEntry,
 } from '../index';
 
 // DOM Elements
@@ -29,6 +30,15 @@ const statDropped = document.getElementById('statDropped')!;
 const statDecoder = document.getElementById('statDecoder')!;
 const statTotal = document.getElementById('statTotal')!;
 const statRenderFps = document.getElementById('statRenderFps')!;
+const statVideoBandwidth = document.getElementById('statVideoBandwidth')!;
+const statAudioBandwidth = document.getElementById('statAudioBandwidth')!;
+
+// Timing graph elements
+const timingCanvas = document.getElementById('timingCanvas') as HTMLCanvasElement;
+const timingCtx = timingCanvas.getContext('2d')!;
+const timingAvgInterval = document.getElementById('timingAvgInterval')!;
+const timingMaxInterval = document.getElementById('timingMaxInterval')!;
+const timingJitter = document.getElementById('timingJitter')!;
 
 // Controls
 const btnPlay = document.getElementById('btnPlay')!;
@@ -91,6 +101,10 @@ let currentSource: IStreamSource | null = null;
 let animationFrameId: number | null = null;
 let isFileMode: boolean = false;
 
+// Video dimensions tracking for 1:1 fullscreen rendering
+let lastVideoWidth = 0;
+let lastVideoHeight = 0;
+
 // FPS tracking
 let frameCount = 0;
 let lastFpsUpdate = 0;
@@ -134,6 +148,175 @@ function updateStats() {
   } else {
     statLatency.textContent = '-';
   }
+  
+  // Display bandwidth
+  if (stats.bandwidth) {
+    statVideoBandwidth.textContent = formatBandwidth(stats.bandwidth.videoBytesPerSecond);
+    statAudioBandwidth.textContent = formatBandwidth(stats.bandwidth.audioBytesPerSecond);
+  } else {
+    statVideoBandwidth.textContent = '-';
+    statAudioBandwidth.textContent = '-';
+  }
+  
+  // Update timing graph
+  updateTimingGraph();
+}
+
+// Format bandwidth in human-readable form
+function formatBandwidth(bytesPerSecond: number): string {
+  if (bytesPerSecond === 0) return '0 bps';
+  
+  const bitsPerSecond = bytesPerSecond * 8;
+  
+  if (bitsPerSecond >= 1_000_000) {
+    return `${(bitsPerSecond / 1_000_000).toFixed(2)} Mbps`;
+  } else if (bitsPerSecond >= 1_000) {
+    return `${(bitsPerSecond / 1_000).toFixed(1)} Kbps`;
+  } else {
+    return `${bitsPerSecond.toFixed(0)} bps`;
+  }
+}
+
+// Timing graph colors
+const TIMING_COLORS = {
+  normal: '#4ecdc4',
+  dropped: '#e74c3c',
+  keyframe: '#f39c12',
+  late: '#9b59b6',
+  background: '#0d1117',
+  grid: '#21262d',
+  text: '#888',
+};
+
+// Update the timing graph visualization
+function updateTimingGraph() {
+  if (!player) {
+    clearTimingGraph();
+    return;
+  }
+  
+  const history = player.getPacketTimingHistory();
+  if (history.length === 0) {
+    clearTimingGraph();
+    return;
+  }
+  
+  // Set canvas resolution to match display size
+  const rect = timingCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  if (timingCanvas.width !== rect.width * dpr || timingCanvas.height !== rect.height * dpr) {
+    timingCanvas.width = rect.width * dpr;
+    timingCanvas.height = rect.height * dpr;
+    timingCtx.scale(dpr, dpr);
+  }
+  
+  const width = rect.width;
+  const height = rect.height;
+  
+  // Clear canvas
+  timingCtx.fillStyle = TIMING_COLORS.background;
+  timingCtx.fillRect(0, 0, width, height);
+  
+  // Calculate stats
+  const intervals = history.slice(1).map(e => e.intervalMs);
+  if (intervals.length === 0) {
+    clearTimingGraph();
+    return;
+  }
+  
+  const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  const maxInterval = Math.max(...intervals);
+  
+  // Find the index of the largest gap for highlighting
+  const maxGapIndex = intervals.indexOf(maxInterval);
+  
+  // Calculate jitter (standard deviation)
+  const variance = intervals.reduce((sum, val) => sum + Math.pow(val - avgInterval, 2), 0) / intervals.length;
+  const jitter = Math.sqrt(variance);
+  
+  // Update stats display
+  timingAvgInterval.textContent = `Avg: ${avgInterval.toFixed(1)}ms`;
+  timingMaxInterval.textContent = `Max: ${maxInterval.toFixed(0)}ms`;
+  timingJitter.textContent = `Jitter: ${jitter.toFixed(1)}ms`;
+  
+  // Calculate scale - aim for 100ms max normally, but scale up if needed
+  const graphMaxMs = Math.max(100, maxInterval * 1.2);
+  
+  // Draw grid lines
+  timingCtx.strokeStyle = TIMING_COLORS.grid;
+  timingCtx.lineWidth = 1;
+  
+  // Horizontal grid lines (every 25ms or so)
+  const gridStep = graphMaxMs > 200 ? 50 : 25;
+  timingCtx.font = '10px monospace';
+  timingCtx.fillStyle = TIMING_COLORS.text;
+  timingCtx.textAlign = 'right';
+  
+  for (let ms = gridStep; ms < graphMaxMs; ms += gridStep) {
+    const y = height - (ms / graphMaxMs) * (height - 20);
+    timingCtx.beginPath();
+    timingCtx.moveTo(30, y);
+    timingCtx.lineTo(width, y);
+    timingCtx.stroke();
+    timingCtx.fillText(`${ms}ms`, 28, y + 3);
+  }
+  
+  // Draw bars for each packet
+  const barWidth = Math.max(2, (width - 35) / history.length - 1);
+  const graphLeft = 35;
+  
+  history.forEach((entry, i) => {
+    if (i === 0) return; // Skip first entry (no interval)
+    
+    const x = graphLeft + (i - 1) * (barWidth + 1);
+    const barHeight = Math.min((entry.intervalMs / graphMaxMs) * (height - 20), height - 20);
+    const y = height - barHeight;
+    
+    // Determine bar color
+    let color = TIMING_COLORS.normal;
+    if (entry.wasDropped) {
+      color = TIMING_COLORS.dropped;
+    } else if (entry.isKeyframe) {
+      color = TIMING_COLORS.keyframe;
+    } else if (entry.intervalMs > 50) {
+      color = TIMING_COLORS.late;
+    }
+    
+    timingCtx.fillStyle = color;
+    timingCtx.fillRect(x, y, barWidth, barHeight);
+    
+    // Highlight the bar with the largest gap
+    if (i - 1 === maxGapIndex) {
+      timingCtx.strokeStyle = '#ffffff';
+      timingCtx.lineWidth = 2;
+      timingCtx.strokeRect(x - 1, y - 1, barWidth + 2, barHeight + 2);
+    }
+  });
+  
+  // Draw expected interval line (based on frame rate)
+  const stats = player.getStats();
+  if (stats.frameRate > 0) {
+    const expectedInterval = 1000 / stats.frameRate;
+    const expectedY = height - (expectedInterval / graphMaxMs) * (height - 20);
+    timingCtx.strokeStyle = '#2ecc71';
+    timingCtx.lineWidth = 2;
+    timingCtx.setLineDash([5, 5]);
+    timingCtx.beginPath();
+    timingCtx.moveTo(graphLeft, expectedY);
+    timingCtx.lineTo(width, expectedY);
+    timingCtx.stroke();
+    timingCtx.setLineDash([]);
+  }
+}
+
+// Clear timing graph
+function clearTimingGraph() {
+  const rect = timingCanvas.getBoundingClientRect();
+  timingCtx.fillStyle = TIMING_COLORS.background;
+  timingCtx.fillRect(0, 0, rect.width, rect.height);
+  timingAvgInterval.textContent = 'Avg: -ms';
+  timingMaxInterval.textContent = 'Max: -ms';
+  timingJitter.textContent = 'Jitter: -ms';
 }
 
 // Create player with current settings
@@ -178,21 +361,40 @@ function renderLoop(timestamp: number) {
     const frame = filePlayer.getVideoFrame();
     
     if (frame) {
-      // Scale canvas to fill container while maintaining aspect ratio
-      const container = videoCanvas.parentElement;
-      if (container) {
-        const containerWidth = container.clientWidth;
-        const containerHeight = container.clientHeight;
-        
-        // Only update canvas size if container size changed
-        if (videoCanvas.width !== containerWidth || videoCanvas.height !== containerHeight) {
-          videoCanvas.width = containerWidth;
-          videoCanvas.height = containerHeight;
-        }
+      // Get frame dimensions (works for both VideoFrame and YUVFrame)
+      const frameWidth = (frame as any).displayWidth || (frame as any).width;
+      const frameHeight = (frame as any).displayHeight || (frame as any).height;
+      
+      // Track video dimensions
+      if (frameWidth && frameHeight) {
+        lastVideoWidth = frameWidth;
+        lastVideoHeight = frameHeight;
       }
       
-      // Draw the frame scaled to fill the canvas
-      ctx.drawImage(frame, 0, 0, videoCanvas.width, videoCanvas.height);
+      const isFullscreen = document.fullscreenElement === videoContainer;
+      
+      if (isFullscreen && lastVideoWidth > 0 && lastVideoHeight > 0) {
+        // In fullscreen: use 1:1 pixel ratio (canvas size = video size)
+        if (videoCanvas.width !== lastVideoWidth || videoCanvas.height !== lastVideoHeight) {
+          videoCanvas.width = lastVideoWidth;
+          videoCanvas.height = lastVideoHeight;
+        }
+        // Draw at native resolution
+        ctx.drawImage(frame, 0, 0);
+      } else {
+        // Not fullscreen: scale to fill container
+        const container = videoCanvas.parentElement;
+        if (container) {
+          const containerWidth = container.clientWidth;
+          const containerHeight = container.clientHeight;
+          
+          if (videoCanvas.width !== containerWidth || videoCanvas.height !== containerHeight) {
+            videoCanvas.width = containerWidth;
+            videoCanvas.height = containerHeight;
+          }
+        }
+        ctx.drawImage(frame, 0, 0, videoCanvas.width, videoCanvas.height);
+      }
     }
     
     // Update stats and seek bar every 500ms
@@ -206,21 +408,40 @@ function renderLoop(timestamp: number) {
     const frame = player.getVideoFrame(timestamp);
     
     if (frame) {
-      // Scale canvas to fill container while maintaining aspect ratio
-      const container = videoCanvas.parentElement;
-      if (container) {
-        const containerWidth = container.clientWidth;
-        const containerHeight = container.clientHeight;
-        
-        // Only update canvas size if container size changed
-        if (videoCanvas.width !== containerWidth || videoCanvas.height !== containerHeight) {
-          videoCanvas.width = containerWidth;
-          videoCanvas.height = containerHeight;
-        }
+      // Get frame dimensions (works for both VideoFrame and YUVFrame)
+      const frameWidth = (frame as any).displayWidth || (frame as any).width;
+      const frameHeight = (frame as any).displayHeight || (frame as any).height;
+      
+      // Track video dimensions
+      if (frameWidth && frameHeight) {
+        lastVideoWidth = frameWidth;
+        lastVideoHeight = frameHeight;
       }
       
-      // Draw the frame scaled to fill the canvas
-      ctx.drawImage(frame, 0, 0, videoCanvas.width, videoCanvas.height);
+      const isFullscreen = document.fullscreenElement === videoContainer;
+      
+      if (isFullscreen && lastVideoWidth > 0 && lastVideoHeight > 0) {
+        // In fullscreen: use 1:1 pixel ratio (canvas size = video size)
+        if (videoCanvas.width !== lastVideoWidth || videoCanvas.height !== lastVideoHeight) {
+          videoCanvas.width = lastVideoWidth;
+          videoCanvas.height = lastVideoHeight;
+        }
+        // Draw at native resolution
+        ctx.drawImage(frame, 0, 0);
+      } else {
+        // Not fullscreen: scale to fill container
+        const container = videoCanvas.parentElement;
+        if (container) {
+          const containerWidth = container.clientWidth;
+          const containerHeight = container.clientHeight;
+          
+          if (videoCanvas.width !== containerWidth || videoCanvas.height !== containerHeight) {
+            videoCanvas.width = containerWidth;
+            videoCanvas.height = containerHeight;
+          }
+        }
+        ctx.drawImage(frame, 0, 0, videoCanvas.width, videoCanvas.height);
+      }
     }
     
     // Update stats every 500ms
@@ -277,6 +498,9 @@ function disconnect() {
   // Clear canvas
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, videoCanvas.width, videoCanvas.height);
+  
+  // Clear timing graph
+  clearTimingGraph();
   
   // Reset file UI
   fileSeekBar.value = '0';
