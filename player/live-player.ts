@@ -243,7 +243,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * Convenience method to connect to a MoQ-like session
    * 
    * Note: For audio support, the MoQ session must also be subscribed to the audio track.
-   * When using StandaloneMoQSource, include both 'video' and 'audio' in subscriptions.
+   * When using MoQSource, include both 'video' and 'audio' in subscriptions.
    * When using Elmo's MoQSessionNode, add an audio track to the session config.
    * 
    * @param session - MoQ session implementing IStreamSource (e.g., Elmo's MoQSessionNode)
@@ -269,7 +269,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     namespace: string, 
     options?: { videoTrack?: string; audioTrack?: string | false }
   ): Promise<void> {
-    const { createStandaloneMoQSource } = await import('../sources/standalone-moq-source');
+    const { createMoQSource } = await import('../sources/moq-source');
     
     const videoTrack = options?.videoTrack ?? this.config.videoTrackName ?? 'video';
     const audioTrack = options?.audioTrack === false 
@@ -286,7 +286,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     
     this.logger.info(`MoQ subscriptions: ${JSON.stringify(subscriptions)}`);
     
-    const source = createStandaloneMoQSource({
+    const source = createMoQSource({
       relayUrl,
       namespace,
       subscriptions,
@@ -572,9 +572,6 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
     
     const isKeyframe = !!(data.header.flags & FLAG_IS_KEYFRAME);
-    if (isKeyframe) {
-      this.logger.info(`Keyframe received: ${data.codec_data.width}x${data.codec_data.height}`);
-    }
     
     // Check for codec changes
     if (codecDataChanged(this.currentCodecData, data.codec_data)) {
@@ -637,7 +634,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         }
         return;
       }
-      this.logger.info('Keyframe received, resuming decode');
+      this.logger.debug('Keyframe received, resuming decode');
       this.waitingForKeyframe = false;
       this.lastWaitingForKeyframeLog = 0;
     }

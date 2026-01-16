@@ -2,65 +2,19 @@
  * Chat Demo - Showcasing web-live-player library
  * 
  * A simple multi-user video chat using MoQ transport.
- * Demonstrates: MediaCapture, MoQCaptureSink, LiveVideoPlayer, BaseStreamSource
+ * Demonstrates: MediaCapture, MoQCaptureSink, LiveVideoPlayer, MoQSource
  */
 
-import type { MoqSessionSubscriber, MoQSessionConfig, SubscriptionConfig } from 'stinky-moq-js';
+import type { MoqSessionSubscriber, MoQSessionConfig } from 'stinky-moq-js';
 import {
   MediaCapture,
   MoQCaptureSink,
   LiveVideoPlayer,
-  BaseStreamSource,
-  SesameBinaryProtocol,
+  MoQSource,
   CodecType,
   type MediaCaptureConfig,
   type StreamDataEvent,
 } from '../../index';
-
-// ============================================================================
-// MoQ Stream Source Adapter
-// ============================================================================
-
-/**
- * Adapts MoqSessionSubscriber to the library's IStreamSource interface.
- * This bridges stinky-moq-js with web-live-player.
- */
-class MoqStreamSource extends BaseStreamSource {
-  constructor(
-    private subscriber: MoqSessionSubscriber,
-    private onChat?: (msg: ChatMessage) => void
-  ) {
-    super();
-    
-    subscriber.on('data', (trackName: string, data: Uint8Array) => {
-      if (trackName === 'chat') {
-        try {
-          const msg = JSON.parse(new TextDecoder().decode(data));
-          this.onChat?.(msg);
-        } catch {}
-        return;
-      }
-      
-      const parsed = SesameBinaryProtocol.parseData(data);
-      if (parsed.valid) {
-        this.emit('data', {
-          trackName,
-          streamType: trackName as 'video' | 'audio',
-          data: parsed,
-        } as StreamDataEvent);
-      }
-    });
-    
-    subscriber.on('error', (e: Error) => this.emit('error', e));
-    this._connected = true;
-    this.emit('connected');
-  }
-  
-  override dispose() {
-    this.subscriber.dispose();
-    super.dispose();
-  }
-}
 
 // ============================================================================
 // Types
@@ -77,7 +31,7 @@ interface RemoteUser {
   id: string;
   name: string;
   player: LiveVideoPlayer;
-  source: MoqStreamSource;
+  source: MoQSource;
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
 }
@@ -266,29 +220,38 @@ async function startDiscovery() {
 }
 
 async function subscribeToUser(id: string, namespace: string) {
-  const { MoqSessionSubscriber } = await import('stinky-moq-js');
-  
-  const config: MoQSessionConfig = { relayUrl, namespace, reconnection: { delay: 3000 } };
-  const subs: SubscriptionConfig[] = [
-    { trackName: 'video', priority: 1 },
-    { trackName: 'audio', priority: 2 },
-    { trackName: 'chat', priority: 3 },
-  ];
-  
-  const subscriber = new MoqSessionSubscriber(config, subs);
   const { canvas, ctx } = createRemoteCanvas(id, id);
   
-  // Create stream source adapter
-  const source = new MoqStreamSource(subscriber, (msg) => {
-    // Update name from chat
-    const user = remoteUsers.get(id);
-    if (user && msg.userName) {
-      user.name = msg.userName;
-      const label = document.querySelector(`#tile-${id} .user-label`);
-      if (label) label.textContent = msg.userName;
-    }
-    addChat(msg, false);
+  // Use library's MoQSource with video, audio, and chat tracks
+  const source = new MoQSource({
+    relayUrl,
+    namespace,
+    subscriptions: [
+      { trackName: 'video', streamType: 'video', priority: 1 },
+      { trackName: 'audio', streamType: 'audio', priority: 2 },
+      { trackName: 'chat', streamType: 'data', priority: 3 },
+    ],
+    reconnectionDelay: 3000,
   });
+  
+  // Listen for chat messages on the data track
+  source.on('data', (event: StreamDataEvent) => {
+    if (event.trackName === 'chat' && event.data.payload) {
+      try {
+        const msg = JSON.parse(new TextDecoder().decode(event.data.payload)) as ChatMessage;
+        // Update name from chat
+        const user = remoteUsers.get(id);
+        if (user && msg.userName) {
+          user.name = msg.userName;
+          const label = document.querySelector(`#tile-${id} .user-label`);
+          if (label) label.textContent = msg.userName;
+        }
+        addChat(msg, false);
+      } catch {}
+    }
+  });
+  
+  await source.connect();
   
   // Create player using the library
   const player = new LiveVideoPlayer({
@@ -304,8 +267,6 @@ async function subscribeToUser(id: string, namespace: string) {
   remoteUsers.set(id, { id, name: id, player, source, canvas, ctx });
   addSystem(`${id} joined`);
   updateUserCount();
-  
-  await subscriber.connect();
 }
 
 function removeUser(id: string) {

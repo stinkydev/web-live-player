@@ -23,7 +23,7 @@ export { FileVideoPlayer, createFilePlayer } from './player/file-player';
 export type { FilePlayerConfig, FilePlayerState, FilePlayerStats, FilePlayMode } from './player/file-player';
 
 // Stream sources
-export { createStandaloneMoQSource, StandaloneMoQSource } from './sources/standalone-moq-source';
+export { createMoQSource, MoQSource } from './sources/moq-source';
 export { WebSocketSource, createWebSocketSource } from './sources/websocket-source';
 export type { WebSocketSourceConfig, VideoMetadata } from './sources/websocket-source';
 

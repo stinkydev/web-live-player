@@ -6,7 +6,7 @@ import {
   createPlayer, 
   LiveVideoPlayer,
   IStreamSource,
-  createStandaloneMoQSource,
+  createMoQSource,
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
@@ -622,7 +622,7 @@ async function connectMoQ() {
     player = createPlayerInstance();
     
     // Create MoQ source with both video and audio tracks
-    const moqSource = createStandaloneMoQSource({
+    const moqSource = createMoQSource({
       relayUrl,
       namespace,
       subscriptions: [
