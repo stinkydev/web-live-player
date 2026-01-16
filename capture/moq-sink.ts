@@ -48,6 +48,10 @@ export class MoQCaptureSink extends BaseCaptureSink {
   
   // Track current group for video (multiple frames can be in a group)
   private currentVideoGroup: boolean = true; // Start with needing a new group
+  
+  // Audio grouping: bundle 50 audio frames per group
+  private audioFrameCount: number = 0;
+  private static readonly AUDIO_FRAMES_PER_GROUP = 50;
 
   constructor(config: MoQSinkConfig) {
     super(config);
@@ -120,6 +124,7 @@ export class MoQCaptureSink extends BaseCaptureSink {
     }
     // Reset group state - next video frame needs a new group
     this.currentVideoGroup = true;
+    this.audioFrameCount = 0;
   }
 
   send(packet: SerializedPacket): void {
@@ -155,8 +160,13 @@ export class MoQCaptureSink extends BaseCaptureSink {
         }
       }
     } else {
-      // Audio: each packet is its own group
-      newGroup = true;
+      // Audio: bundle 50 frames per group
+      if (this.audioFrameCount % MoQCaptureSink.AUDIO_FRAMES_PER_GROUP === 0) {
+        newGroup = true;
+      } else {
+        newGroup = false;
+      }
+      this.audioFrameCount++;
     }
 
     // Send data to MoQ session
