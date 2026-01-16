@@ -206,14 +206,30 @@ export class MediaStreamEncoder {
 
     this.videoMetadata = { width, height };
 
+    const codecString = codecTypeToString(options.codec);
+    
     const videoConfig: VideoEncoderConfig = {
-      codec: codecTypeToString(options.codec),
+      codec: codecString,
       width,
       height,
       bitrate: options.bitrate || 2_000_000,
       framerate: frameRate,
       latencyMode: options.latencyMode || 'realtime',
     };
+    
+    // For H.264/AVC, use Annex B format which includes start codes
+    // This makes the bitstream self-describing and doesn't require separate
+    // decoder configuration (SPS/PPS) to be transmitted out-of-band
+    if (codecString.startsWith('avc1')) {
+      // @ts-ignore - avc option is not in standard types yet
+      videoConfig.avc = { format: 'annexb' };
+    }
+    
+    // For HEVC, also use Annex B format if supported
+    if (codecString.startsWith('hvc1') || codecString.startsWith('hev1')) {
+      // @ts-ignore - hevc option is not in standard types yet
+      videoConfig.hevc = { format: 'annexb' };
+    }
 
     // Create the video worker
     this.videoWorker = new Worker(

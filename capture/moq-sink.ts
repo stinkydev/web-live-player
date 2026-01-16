@@ -10,7 +10,8 @@ import {
   CaptureSinkConfig,
   SerializedPacket,
 } from './capture-sink';
-import type { MoqSessionBroadcaster, MoQSessionConfig, BroadcastConfig } from 'stinky-moq-js';
+import type { MoqSessionBroadcaster, MoQSessionConfig, BroadcastConfig, SessionStatus } from 'stinky-moq-js';
+import { SessionState } from 'stinky-moq-js';
 
 /**
  * Track configuration for MoQ publishing
@@ -44,8 +45,13 @@ export class MoQCaptureSink extends BaseCaptureSink {
   private session: MoqSessionBroadcaster | null = null;
   private connecting = false;
   private disposed = false;
-  private audioGroupSequence = 0;
-  private videoGroupSequence = 0;
+  
+  // Track current group for video (multiple frames can be in a group)
+  private currentVideoGroup: boolean = true; // Start with needing a new group
+  
+  // Audio grouping - bundle multiple samples per group for efficiency
+  private audioSamplesInGroup: number = 0;
+  private static readonly AUDIO_SAMPLES_PER_GROUP = 10; // ~200ms at 20ms/sample
 
   constructor(config: MoQSinkConfig) {
     super(config);
@@ -116,68 +122,101 @@ export class MoQCaptureSink extends BaseCaptureSink {
       this.session = null;
       this._connected = false;
     }
-    this.audioGroupSequence = 0;
-    this.videoGroupSequence = 0;
+    // Reset group state - next video frame needs a new group
+    this.currentVideoGroup = true;
+    this.audioSamplesInGroup = 0;
   }
 
   send(packet: SerializedPacket): void {
+    // Check session state before trying to send
     if (!this.session || !this._connected) {
       return;
     }
 
-    try {
-      const trackConfig = packet.type === 'video' 
-        ? this.moqConfig.videoTrack 
-        : this.moqConfig.audioTrack;
+    const trackConfig = packet.type === 'video' 
+      ? this.moqConfig.videoTrack 
+      : this.moqConfig.audioTrack;
 
-      if (!trackConfig) {
-        return;
-      }
+    if (!trackConfig) {
+      return;
+    }
 
-      // Determine if this should start a new group
-      // Video: new group on keyframe
-      // Audio: each packet is a new group
-      let newGroup = false;
-      if (packet.type === 'video') {
-        if (packet.isKeyframe) {
-          this.videoGroupSequence++;
-          newGroup = true;
-        }
-      } else {
-        this.audioGroupSequence++;
+    // Determine if this should start a new group
+    // Video: new group on keyframe, then all delta frames belong to that group
+    // Audio: bundle multiple samples per group for efficiency
+    let newGroup: boolean;
+    
+    if (packet.type === 'video') {
+      if (packet.isKeyframe) {
+        // Keyframe starts a new group
         newGroup = true;
+        this.currentVideoGroup = false; // Next frame will be in this group
+      } else {
+        // Delta frame: only start new group if we haven't had a keyframe yet
+        newGroup = this.currentVideoGroup;
+        if (newGroup) {
+          // We're starting a group with a non-keyframe (shouldn't happen normally)
+          this.currentVideoGroup = false;
+        }
       }
+    } else {
+      // Audio: start new group every N samples
+      if (this.audioSamplesInGroup >= MoQCaptureSink.AUDIO_SAMPLES_PER_GROUP) {
+        newGroup = true;
+        this.audioSamplesInGroup = 1;
+      } else {
+        newGroup = this.audioSamplesInGroup === 0;
+        this.audioSamplesInGroup++;
+      }
+    }
 
-      // Send data to MoQ session
+    // Send data to MoQ session
+    // Silently catch errors - they're expected during normal operation
+    // (stream resets, subscriber disconnections, etc.)
+    try {
       this.session.send(
         trackConfig.trackName,
         new Uint8Array(packet.data),
         newGroup
       );
-    } catch (err) {
-      console.error('Failed to send MoQ packet:', err);
+    } catch {
+      // Silently ignore send errors - this matches the working implementation
+      // The session will handle reconnection internally
     }
   }
 
   private setupEventListeners(): void {
     if (!this.session) return;
 
-    // Listen for new subscribers (to send keyframes)
-    this.session.on('new-subscriber', (info: { trackName: string }) => {
-      if (info.trackName === this.moqConfig.videoTrack?.trackName) {
+    // Listen for track requests (when a new subscriber wants a track)
+    // This is the correct event name from stinky-moq-js
+    this.session.on('trackRequested', (trackName: string) => {
+      if (trackName === this.moqConfig.videoTrack?.trackName) {
+        // Reset video group state - next frame needs to start a new group
+        this.currentVideoGroup = true;
+        // Request a keyframe from the encoder
         this.requestKeyframe();
       }
     });
 
     // Listen for errors
-    this.session.on('error', (error: any) => {
+    this.session.on('error', (error: Error) => {
       console.error('MoQ session error:', error);
+      // Some errors may indicate we need to reset group state
+      if (error.message?.includes('reset') || error.message?.includes('stream')) {
+        this.currentVideoGroup = true;
+      }
     });
 
-    // Listen for state changes
-    this.session.on('stateChange', (status: any) => {
-      if (status.state === 'disconnected') {
-        this._connected = false;
+    // Listen for state changes to keep _connected in sync
+    this.session.on('stateChange', (status: SessionStatus) => {
+      const wasConnected = this._connected;
+      this._connected = status.state === SessionState.CONNECTED;
+      
+      // If we just disconnected, reset group state for reconnection
+      if (wasConnected && !this._connected) {
+        this.currentVideoGroup = true;
+        this.audioSamplesInGroup = 0;
       }
     });
   }
