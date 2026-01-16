@@ -33,6 +33,8 @@ export interface MoQSinkConfig extends CaptureSinkConfig {
   videoTrack?: MoQTrackConfig;
   /** Audio track configuration */
   audioTrack?: MoQTrackConfig;
+  /** Additional data tracks (e.g., for chat messages) */
+  dataTracks?: MoQTrackConfig[];
   /** Reconnection delay in ms */
   reconnectionDelay?: number;
 }
@@ -98,6 +100,17 @@ export class MoQCaptureSink extends BaseCaptureSink {
           priority: this.moqConfig.audioTrack.priority ?? 2,
           type: 'audio',
         });
+      }
+      
+      // Add any additional data tracks
+      if (this.moqConfig.dataTracks) {
+        for (const dataTrack of this.moqConfig.dataTracks) {
+          broadcasts.push({
+            trackName: dataTrack.trackName,
+            priority: dataTrack.priority ?? 3,
+            type: 'data',
+          });
+        }
       }
 
       this.session = new MoqSessionBroadcaster(sessionConfig, broadcasts);
@@ -222,6 +235,25 @@ export class MoQCaptureSink extends BaseCaptureSink {
   dispose(): void {
     this.disposed = true;
     super.dispose();
+  }
+  
+  /**
+   * Send custom data on a data track (e.g., chat messages)
+   * Each data message starts a new group.
+   * @param trackName The data track name to send on
+   * @param data The data to send
+   */
+  sendData(trackName: string, data: Uint8Array): void {
+    if (!this.session || !this._connected) {
+      return;
+    }
+    
+    try {
+      // Data messages always start a new group
+      this.session.send(trackName, data, true);
+    } catch {
+      // Silently ignore send errors
+    }
   }
 }
 

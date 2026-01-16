@@ -110,7 +110,12 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   // Metadata
   private streamWidth: number = 0;
   private streamHeight: number = 0;
-  private estimatedFrameRate: number = 0;
+  private estimatedFrameRate: number = 30; // Default, will be estimated from timestamps
+  
+  // FPS estimation from video timestamps
+  private lastVideoTimestampUs: number = -1;
+  private fpsEstimateSamples: number[] = [];  // Recent frame duration samples
+  private static readonly FPS_SAMPLE_COUNT = 10;  // Number of samples for averaging
   
   // Audio
   private audioContext: AudioContext | null = null;
@@ -650,6 +655,24 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.arrivalTimes.set(timestampUs, arrivalTime);
       this.keyframeStatus.set(timestampUs, isKeyframe);
       
+      // Estimate FPS from timestamp difference between consecutive frames
+      if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
+        const frameDurationUs = timestampUs - this.lastVideoTimestampUs;
+        // Only accept reasonable frame durations (1-200 fps range)
+        if (frameDurationUs > 5000 && frameDurationUs < 1000000) {
+          this.fpsEstimateSamples.push(frameDurationUs);
+          if (this.fpsEstimateSamples.length > LiveVideoPlayer.FPS_SAMPLE_COUNT) {
+            this.fpsEstimateSamples.shift();
+          }
+          // Calculate average FPS from samples
+          if (this.fpsEstimateSamples.length >= 3) {
+            const avgDurationUs = this.fpsEstimateSamples.reduce((a, b) => a + b, 0) / this.fpsEstimateSamples.length;
+            this.estimatedFrameRate = Math.round(1000000 / avgDurationUs);
+          }
+        }
+      }
+      this.lastVideoTimestampUs = timestampUs;
+      
       // Clean up old entries (keep last 100)
       if (this.arrivalTimes.size > 100) {
         const entries = [...this.arrivalTimes.entries()];
@@ -757,10 +780,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.streamWidth = codecData.width;
       this.streamHeight = codecData.height;
       
-      // Estimate frame rate from timebase
-      if (codecData.timebase_num && codecData.timebase_den) {
-        this.estimatedFrameRate = codecData.timebase_den / codecData.timebase_num;
-      }
+      // Reset FPS estimation for new stream (keep default of 30 until estimated)
+      this.lastVideoTimestampUs = -1;
+      this.fpsEstimateSamples = [];
+      this.estimatedFrameRate = 30;
       
       this.emit('metadata', {
         width: codecData.width,
