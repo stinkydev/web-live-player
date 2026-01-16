@@ -48,10 +48,6 @@ export class MoQCaptureSink extends BaseCaptureSink {
   
   // Track current group for video (multiple frames can be in a group)
   private currentVideoGroup: boolean = true; // Start with needing a new group
-  
-  // Audio grouping - bundle multiple samples per group for efficiency
-  private audioSamplesInGroup: number = 0;
-  private static readonly AUDIO_SAMPLES_PER_GROUP = 10; // ~200ms at 20ms/sample
 
   constructor(config: MoQSinkConfig) {
     super(config);
@@ -124,7 +120,6 @@ export class MoQCaptureSink extends BaseCaptureSink {
     }
     // Reset group state - next video frame needs a new group
     this.currentVideoGroup = true;
-    this.audioSamplesInGroup = 0;
   }
 
   send(packet: SerializedPacket): void {
@@ -143,7 +138,7 @@ export class MoQCaptureSink extends BaseCaptureSink {
 
     // Determine if this should start a new group
     // Video: new group on keyframe, then all delta frames belong to that group
-    // Audio: bundle multiple samples per group for efficiency
+    // Audio: each packet is its own group (matches working implementation)
     let newGroup: boolean;
     
     if (packet.type === 'video') {
@@ -160,14 +155,8 @@ export class MoQCaptureSink extends BaseCaptureSink {
         }
       }
     } else {
-      // Audio: start new group every N samples
-      if (this.audioSamplesInGroup >= MoQCaptureSink.AUDIO_SAMPLES_PER_GROUP) {
-        newGroup = true;
-        this.audioSamplesInGroup = 1;
-      } else {
-        newGroup = this.audioSamplesInGroup === 0;
-        this.audioSamplesInGroup++;
-      }
+      // Audio: each packet is its own group
+      newGroup = true;
     }
 
     // Send data to MoQ session
@@ -216,7 +205,6 @@ export class MoQCaptureSink extends BaseCaptureSink {
       // If we just disconnected, reset group state for reconnection
       if (wasConnected && !this._connected) {
         this.currentVideoGroup = true;
-        this.audioSamplesInGroup = 0;
       }
     });
   }

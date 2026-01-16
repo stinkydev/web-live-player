@@ -576,10 +576,10 @@ function renderLoop(timestamp: number) {
         
         user.ctx.drawImage(frame, 0, 0);
         
-        // Close the frame to release resources
-        if ('close' in frame && typeof frame.close === 'function') {
-          frame.close();
-        }
+        // NOTE: Do NOT close the frame here!
+        // The player manages frame lifecycle - it will close the frame
+        // when a new one arrives. Closing here would cause "VideoFrame has been closed"
+        // errors on subsequent draws since getVideoFrame() returns the same frame.
       }
     }
   }
