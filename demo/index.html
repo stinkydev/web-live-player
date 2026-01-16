@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sesame Video Player</title>
+  <title>Web Live Player - Demos</title>
   <style>
     * {
       box-sizing: border-box;
@@ -16,538 +16,152 @@
       background: #1a1a2e;
       color: #eee;
       min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
       padding: 20px;
     }
     
     h1 {
-      text-align: center;
-      margin-bottom: 20px;
+      margin-bottom: 10px;
       color: #4ecdc4;
     }
     
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
+    .subtitle {
+      color: #888;
+      margin-bottom: 40px;
     }
     
-    .panel {
-      background: #16213e;
-      border-radius: 8px;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-    
-    .panel h2 {
-      color: #4ecdc4;
-      margin-bottom: 15px;
-      font-size: 1.1rem;
-      border-bottom: 1px solid #0f3460;
-      padding-bottom: 10px;
-    }
-    
-    .form-group {
-      margin-bottom: 15px;
-    }
-    
-    .form-group label {
-      display: block;
-      margin-bottom: 5px;
-      color: #aaa;
-      font-size: 0.9rem;
-    }
-    
-    .form-group input,
-    .form-group select {
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      max-width: 800px;
       width: 100%;
-      padding: 10px;
-      border: 1px solid #0f3460;
-      border-radius: 4px;
-      background: #1a1a2e;
-      color: #eee;
-      font-size: 0.95rem;
     }
     
-    .form-group input:focus,
-    .form-group select:focus {
-      outline: none;
+    .demo-card {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 30px;
+      text-decoration: none;
+      color: inherit;
+      transition: transform 0.2s, box-shadow 0.2s;
+      border: 2px solid transparent;
+    }
+    
+    .demo-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    }
+    
+    .demo-card.player {
       border-color: #4ecdc4;
     }
     
-    .btn {
-      padding: 10px 20px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.95rem;
-      transition: background 0.2s;
+    .demo-card.player:hover {
+      background: #1a3a52;
     }
     
-    .btn-primary {
-      background: #4ecdc4;
-      color: #1a1a2e;
+    .demo-card.capture {
+      border-color: #e74c3c;
     }
     
-    .btn-primary:hover {
-      background: #45b7aa;
+    .demo-card.capture:hover {
+      background: #2a1e2e;
     }
     
-    .btn-secondary {
-      background: #0f3460;
-      color: #eee;
-    }
-    
-    .btn-secondary:hover {
-      background: #1a4a7a;
-    }
-    
-    .btn-danger {
-      background: #e74c3c;
-      color: #fff;
-    }
-    
-    .btn-danger:hover {
-      background: #c0392b;
-    }
-    
-    .button-group {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    
-    .video-container {
-      position: relative;
-      background: #000;
-      border-radius: 8px;
-      overflow: hidden;
-      aspect-ratio: 16 / 9;
-      margin-bottom: 20px;
-    }
-    
-    #videoCanvas {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-    }
-    
-    .video-overlay {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      background: rgba(0, 0, 0, 0.7);
-      padding: 10px;
-      border-radius: 4px;
-      font-size: 0.85rem;
-      font-family: monospace;
-    }
-    
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 15px;
-    }
-    
-    .stat-item {
-      background: #1a1a2e;
-      padding: 15px;
-      border-radius: 4px;
-      text-align: center;
-    }
-    
-    .stat-value {
-      font-size: 1.5rem;
-      font-weight: bold;
-      color: #4ecdc4;
-    }
-    
-    .stat-label {
-      font-size: 0.8rem;
-      color: #888;
-      margin-top: 5px;
-    }
-    
-    .log-container {
-      background: #0d1117;
-      border-radius: 4px;
-      padding: 15px;
-      height: 200px;
-      overflow-y: auto;
-      font-family: monospace;
-      font-size: 0.85rem;
-    }
-    
-    .log-entry {
-      padding: 3px 0;
-      border-bottom: 1px solid #21262d;
-    }
-    
-    .log-entry.info { color: #58a6ff; }
-    .log-entry.warn { color: #d29922; }
-    .log-entry.error { color: #f85149; }
-    .log-entry.debug { color: #8b949e; }
-    
-    /* Timing graph styles */
-    .timing-graph-container {
-      background: #0d1117;
-      border-radius: 4px;
-      padding: 10px;
-      margin-bottom: 10px;
-    }
-    
-    #timingCanvas {
-      width: 100%;
-      height: 150px;
-      display: block;
-    }
-    
-    .timing-legend {
-      display: flex;
-      gap: 15px;
-      font-size: 0.8rem;
-      color: #888;
-      margin-bottom: 8px;
-    }
-    
-    .legend-item {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-    
-    .legend-color {
-      width: 12px;
-      height: 12px;
-      border-radius: 2px;
-    }
-    
-    .legend-color.normal { background: #4ecdc4; }
-    .legend-color.dropped { background: #e74c3c; }
-    .legend-color.keyframe { background: #f39c12; }
-    .legend-color.late { background: #9b59b6; }
-    
-    .timing-stats {
-      display: flex;
-      gap: 20px;
-      font-size: 0.85rem;
-      color: #aaa;
-      font-family: monospace;
-    }
-
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 350px;
-      gap: 20px;
-    }
-    
-    @media (max-width: 900px) {
-      .row {
-        grid-template-columns: 1fr;
-      }
-    }
-    
-    .tabs {
-      display: flex;
-      border-bottom: 1px solid #0f3460;
+    .demo-icon {
+      font-size: 3rem;
       margin-bottom: 15px;
     }
     
-    .tab {
-      padding: 10px 20px;
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s;
+    .demo-title {
+      font-size: 1.5rem;
+      font-weight: bold;
+      margin-bottom: 10px;
     }
     
-    .tab:hover {
+    .demo-card.player .demo-title {
       color: #4ecdc4;
     }
     
-    .tab.active {
-      color: #4ecdc4;
-      border-bottom-color: #4ecdc4;
+    .demo-card.capture .demo-title {
+      color: #e74c3c;
     }
     
-    .tab-content {
-      display: none;
+    .demo-card.chat .demo-title {
+      color: #9b59b6;
     }
     
-    .tab-content.active {
-      display: block;
+    .demo-description {
+      color: #aaa;
+      font-size: 0.95rem;
+      line-height: 1.5;
     }
     
-    .status-indicator {
+    .demo-features {
+      margin-top: 15px;
+      font-size: 0.85rem;
+      color: #888;
+    }
+    
+    .demo-features span {
       display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      margin-right: 8px;
-    }
-    
-    .status-indicator.connected { background: #2ecc71; }
-    .status-indicator.disconnected { background: #e74c3c; }
-    .status-indicator.connecting { background: #f39c12; animation: pulse 1s infinite; }
-    
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-    
-    /* Fullscreen styles */
-    .video-container:fullscreen,
-    .video-container:-webkit-full-screen {
-      width: 100vw;
-      height: 100vh;
-      background: #000;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-    }
-    
-    .video-container:fullscreen #videoCanvas,
-    .video-container:-webkit-full-screen #videoCanvas {
-      width: auto;
-      height: auto;
-    }
-    
-    .fullscreen-btn {
-      position: absolute;
-      bottom: 10px;
-      right: 10px;
-      background: rgba(0, 0, 0, 0.7);
-      border: none;
-      color: #fff;
-      padding: 8px 12px;
+      background: #0f3460;
+      padding: 4px 8px;
       border-radius: 4px;
-      cursor: pointer;
-      font-size: 1rem;
-      transition: background 0.2s;
-      z-index: 10;
-    }
-    
-    .fullscreen-btn:hover {
-      background: rgba(78, 205, 196, 0.8);
+      margin: 3px 3px 0 0;
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="row">
-      <div class="main-content">
-        <!-- Video Display -->
-        <div class="panel">
-          <h2>Video Output</h2>
-          <div class="video-container" id="videoContainer">
-            <canvas id="videoCanvas"></canvas>
-            <div class="video-overlay" id="videoOverlay">
-              <span class="status-indicator disconnected" id="statusIndicator"></span>
-              <span id="statusText">Disconnected</span>
-            </div>
-            <button class="fullscreen-btn" id="btnFullscreen" title="Toggle Fullscreen">⛶</button>
-          </div>
-          <div class="button-group">
-            <button class="btn btn-primary" id="btnPlay">▶ Play</button>
-            <button class="btn btn-secondary" id="btnPause">⏸ Pause</button>
-            <button class="btn btn-danger" id="btnDisconnect">⏹ Disconnect</button>
-          </div>
-        </div>
-        
-        <!-- Statistics -->
-        <div class="panel">
-          <h2>Statistics</h2>
-          <div class="stats-grid">
-            <div class="stat-item">
-              <div class="stat-value" id="statBuffer">0ms/0ms</div>
-              <div class="stat-label">Buffer (current/target)</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statLatency">-</div>
-              <div class="stat-label">Latency (decode/buffer/total)</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statResolution">-</div>
-              <div class="stat-label">Resolution</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statFrameRate">-</div>
-              <div class="stat-label">Stream Frame Rate</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statRenderFps">-</div>
-              <div class="stat-label">Render FPS</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statDropped">0</div>
-              <div class="stat-label">Dropped Frames</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statDecoder">-</div>
-              <div class="stat-label">Decoder State</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statTotal">0</div>
-              <div class="stat-label">Total Frames</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statVideoBandwidth">-</div>
-              <div class="stat-label">Video Bandwidth</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value" id="statAudioBandwidth">-</div>
-              <div class="stat-label">Audio Bandwidth</div>
-            </div>
-          </div>
-        </div>
-        
-        <!-- Packet Timing Graph -->
-        <div class="panel">
-          <h2>Packet Timing</h2>
-          <div class="timing-graph-container">
-            <canvas id="timingCanvas" width="800" height="200"></canvas>
-          </div>
-          <div class="timing-legend">
-            <span class="legend-item"><span class="legend-color normal"></span> Normal</span>
-            <span class="legend-item"><span class="legend-color dropped"></span> Dropped</span>
-            <span class="legend-item"><span class="legend-color keyframe"></span> Keyframe</span>
-            <span class="legend-item"><span class="legend-color late"></span> Late (&gt;50ms)</span>
-          </div>
-          <div class="timing-stats">
-            <span id="timingAvgInterval">Avg: -ms</span>
-            <span id="timingMaxInterval">Max: -ms</span>
-            <span id="timingJitter">Jitter: -ms</span>
-          </div>
-        </div>
-      </div>
-      
-      <div class="sidebar">
-        <!-- Connection Settings -->
-        <div class="panel">
-          <h2>Connection</h2>
-          
-          <div class="tabs">
-            <div class="tab active" data-tab="moq">MoQ</div>
-            <div class="tab" data-tab="ws">WebSocket</div>
-            <div class="tab" data-tab="file">File</div>
-            <div class="tab" data-tab="mock">Mock</div>
-          </div>
-          
-          <!-- MoQ Tab -->
-          <div class="tab-content active" id="tab-moq">
-            <div class="form-group">
-              <label>Relay URL</label>
-              <input type="text" id="moqRelayUrl" value="https://r1.moq.sesame-streams.com:4433" placeholder="https://relay.example.com">
-            </div>
-            <div class="form-group">
-              <label>Namespace</label>
-              <input type="text" id="moqNamespace" value="test" placeholder="live/stream">
-            </div>
-            <div class="form-group">
-              <label>Video Track</label>
-              <input type="text" id="moqVideoTrack" value="video" placeholder="video">
-            </div>
-            <div class="form-group">
-              <label>Audio Track</label>
-              <input type="text" id="moqAudioTrack" value="audio" placeholder="audio">
-            </div>
-            <button class="btn btn-primary" id="btnConnectMoq" style="width: 100%;">Connect to MoQ</button>
-          </div>
-          
-          <!-- WebSocket Tab -->
-          <div class="tab-content" id="tab-ws">
-            <div class="form-group">
-              <label>WebSocket URL</label>
-              <input type="text" id="wsUrl" value="ws://localhost:8085/api/video?id=elmo" placeholder="ws://localhost:8085/api/video?id=elmo">
-            </div>
-            <div class="form-group">
-              <label>Stream ID</label>
-              <input type="text" id="wsStreamId" value="ws-slomo-video-1" placeholder="stream-id">
-            </div>
-            <div class="form-group">
-              <label>
-                <input type="checkbox" id="wsAutoReconnect" checked> Auto Reconnect
-              </label>
-            </div>
-            <button class="btn btn-primary" id="btnConnectWs" style="width: 100%;">Connect to WebSocket</button>
-          </div>
-          
-          <!-- Mock Tab -->
-          <div class="tab-content" id="tab-mock">
-            <div class="form-group">
-              <label>Resolution</label>
-              <select id="mockResolution">
-                <option value="640x360">640x360</option>
-                <option value="1280x720" selected>1280x720</option>
-                <option value="1920x1080">1920x1080</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Frame Rate</label>
-              <select id="mockFrameRate">
-                <option value="24">24 fps</option>
-                <option value="30" selected>30 fps</option>
-                <option value="60">60 fps</option>
-              </select>
-            </div>
-            <button class="btn btn-primary" id="btnConnectMock" style="width: 100%;">Start Mock Stream</button>
-          </div>
-          
-          <!-- File Tab -->
-          <div class="tab-content" id="tab-file">
-            <div class="form-group">
-              <label>MP4 File URL</label>
-              <input type="text" id="fileUrl" value="https://dev.sesame-streams.com/player/BigBuckBunny.mp4" placeholder="https://example.com/video.mp4">
-            </div>
-            <div class="form-group">
-              <label>Or select a local file</label>
-              <input type="file" id="fileInput" accept="video/mp4,.mp4">
-            </div>
-            <div class="form-group">
-              <label>
-                <input type="checkbox" id="fileLoop"> Loop playback
-              </label>
-            </div>
-            <button class="btn btn-primary" id="btnLoadFile" style="width: 100%;">Load File</button>
-            <div class="form-group" style="margin-top: 15px;">
-              <label>Position</label>
-              <input type="range" id="fileSeekBar" min="0" max="100" value="0" style="width: 100%;">
-              <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #888;">
-                <span id="filePosition">0:00</span>
-                <span id="fileDuration">0:00</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-        <!-- Player Settings -->
-        <div class="panel">
-          <h2>Player Settings</h2>
-          <div class="form-group">
-            <label>Buffer Delay (ms)</label>
-            <input type="number" id="bufferDelay" value="100" min="0" max="500" step="10">
-          </div>
-          <div class="form-group">
-            <label>Decoder Preference</label>
-            <select id="decoderPreference">
-              <option value="webcodecs-hw">WebCodecs (Hardware)</option>
-              <option value="webcodecs-sw">WebCodecs (Software)</option>
-              <option value="wasm">WASM (Broadway.js)</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>
-              <input type="checkbox" id="debugLogging"> Enable Debug Logging
-            </label>
-          </div>
-        </div>
-        
-        <!-- Log -->
-        <div class="panel">
-          <h2>Log</h2>
-          <div class="log-container" id="logContainer"></div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <h1>🎬 Web Live Player</h1>
+  <p class="subtitle">Demo Applications</p>
   
-  <script type="module" src="./main.ts"></script>
+  <div class="demo-grid">
+    <a href="./player/" class="demo-card player">
+      <div class="demo-icon">📺</div>
+      <div class="demo-title">Play</div>
+      <div class="demo-description">
+        Play live and on-demand video streams with ultra-low latency. Supports WebCodecs and WASM decoders.
+      </div>
+      <div class="demo-features">
+        <span>MoQ</span>
+        <span>WebSocket</span>
+        <span>MP4 Files</span>
+        <span>WebCodecs</span>
+      </div>
+    </a>
+    
+    <a href="./capture/" class="demo-card capture">
+      <div class="demo-icon">📹</div>
+      <div class="demo-title">Capture</div>
+      <div class="demo-description">
+        Capture video and audio from your camera/microphone and stream it over MoQ or WebSocket.
+      </div>
+      <div class="demo-features">
+        <span>WebCodecs</span>
+        <span>H.264</span>
+        <span>VP8/VP9</span>
+        <span>Opus</span>
+      </div>
+    </a>
+    
+    <a href="./chat/" class="demo-card chat">
+      <div class="demo-icon">💬</div>
+      <div class="demo-title">Chat</div>
+      <div class="demo-description">
+        Multi-user video chat room. Auto-discovers users via MoQ announcements with integrated text chat.
+      </div>
+      <div class="demo-features">
+        <span>MoQ</span>
+        <span>Multi-user</span>
+        <span>Video</span>
+        <span>Text Chat</span>
+      </div>
+    </a>
+  </div>
 </body>
 </html>

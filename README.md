@@ -23,7 +23,7 @@ npm install @stinkycomputing/web-live-player
 ### Using with MoQ (Standalone)
 
 ```typescript
-import { createPlayer, createStandaloneMoQSource } from '@stinkycomputing/web-live-player';
+import { createPlayer, createMoQSource } from '@stinkycomputing/web-live-player';
 
 // Create player
 const player = createPlayer({
@@ -32,7 +32,7 @@ const player = createPlayer({
 });
 
 // Create MoQ source
-const moqSource = createStandaloneMoQSource({
+const moqSource = createMoQSource({
   relayUrl: 'https://moq-relay.example.com',
   namespace: 'live/stream',
   subscriptions: [
@@ -372,16 +372,42 @@ const player = createPlayer({
 });
 ```
 
-## Demo
+## Demos
 
-Run the demo application:
+The library includes three demo applications showcasing different use cases:
+
+### [Player Demo](demo/player/)
+Live stream and file playback with multiple decoder options.
+- Connect to MoQ or WebSocket streams
+- Play MP4 files with seeking
+- Real-time statistics and frame timing visualization
+
+### [Capture Demo](demo/capture/)
+Media capture and encoding with transport publishing.
+- Camera/microphone capture with device selection
+- Configurable video/audio codecs and bitrates
+- Publish to MoQ relay or WebSocket server
+
+### [Chat Demo](demo/chat/)
+Multi-user video chat combining capture and playback.
+- Full duplex video/audio communication
+- Room-based user discovery
+- Text chat over data tracks
+
+### Running the Demos
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open http://localhost:3001 to see the demo.
+Open http://localhost:3001 to see all demos.
+
+| Demo | URL | Description |
+|------|-----|-------------|
+| Player | http://localhost:3001/player/ | Stream playback & file player |
+| Capture | http://localhost:3001/capture/ | Camera capture & streaming |
+| Chat | http://localhost:3001/chat/ | Multi-user video chat |
 
 ## Building
 

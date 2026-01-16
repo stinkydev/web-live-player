@@ -110,7 +110,12 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   // Metadata
   private streamWidth: number = 0;
   private streamHeight: number = 0;
-  private estimatedFrameRate: number = 0;
+  private estimatedFrameRate: number = 30; // Default, will be estimated from timestamps
+  
+  // FPS estimation from video timestamps
+  private lastVideoTimestampUs: number = -1;
+  private fpsEstimateSamples: number[] = [];  // Recent frame duration samples
+  private static readonly FPS_SAMPLE_COUNT = 10;  // Number of samples for averaging
   
   // Audio
   private audioContext: AudioContext | null = null;
@@ -238,7 +243,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * Convenience method to connect to a MoQ-like session
    * 
    * Note: For audio support, the MoQ session must also be subscribed to the audio track.
-   * When using StandaloneMoQSource, include both 'video' and 'audio' in subscriptions.
+   * When using MoQSource, include both 'video' and 'audio' in subscriptions.
    * When using Elmo's MoQSessionNode, add an audio track to the session config.
    * 
    * @param session - MoQ session implementing IStreamSource (e.g., Elmo's MoQSessionNode)
@@ -264,7 +269,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     namespace: string, 
     options?: { videoTrack?: string; audioTrack?: string | false }
   ): Promise<void> {
-    const { createStandaloneMoQSource } = await import('../sources/standalone-moq-source');
+    const { createMoQSource } = await import('../sources/moq-source');
     
     const videoTrack = options?.videoTrack ?? this.config.videoTrackName ?? 'video';
     const audioTrack = options?.audioTrack === false 
@@ -281,7 +286,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     
     this.logger.info(`MoQ subscriptions: ${JSON.stringify(subscriptions)}`);
     
-    const source = createStandaloneMoQSource({
+    const source = createMoQSource({
       relayUrl,
       namespace,
       subscriptions,
@@ -567,9 +572,6 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
     
     const isKeyframe = !!(data.header.flags & FLAG_IS_KEYFRAME);
-    if (isKeyframe) {
-      this.logger.info(`Keyframe received: ${data.codec_data.width}x${data.codec_data.height}`);
-    }
     
     // Check for codec changes
     if (codecDataChanged(this.currentCodecData, data.codec_data)) {
@@ -632,7 +634,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         }
         return;
       }
-      this.logger.info('Keyframe received, resuming decode');
+      this.logger.debug('Keyframe received, resuming decode');
       this.waitingForKeyframe = false;
       this.lastWaitingForKeyframeLog = 0;
     }
@@ -649,6 +651,24 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       const timestampUs = rescaleTime(data.header!.pts, sourceTimebase, microsecondTimebase);
       this.arrivalTimes.set(timestampUs, arrivalTime);
       this.keyframeStatus.set(timestampUs, isKeyframe);
+      
+      // Estimate FPS from timestamp difference between consecutive frames
+      if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
+        const frameDurationUs = timestampUs - this.lastVideoTimestampUs;
+        // Only accept reasonable frame durations (1-200 fps range)
+        if (frameDurationUs > 5000 && frameDurationUs < 1000000) {
+          this.fpsEstimateSamples.push(frameDurationUs);
+          if (this.fpsEstimateSamples.length > LiveVideoPlayer.FPS_SAMPLE_COUNT) {
+            this.fpsEstimateSamples.shift();
+          }
+          // Calculate average FPS from samples
+          if (this.fpsEstimateSamples.length >= 3) {
+            const avgDurationUs = this.fpsEstimateSamples.reduce((a, b) => a + b, 0) / this.fpsEstimateSamples.length;
+            this.estimatedFrameRate = Math.round(1000000 / avgDurationUs);
+          }
+        }
+      }
+      this.lastVideoTimestampUs = timestampUs;
       
       // Clean up old entries (keep last 100)
       if (this.arrivalTimes.size > 100) {
@@ -757,10 +777,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.streamWidth = codecData.width;
       this.streamHeight = codecData.height;
       
-      // Estimate frame rate from timebase
-      if (codecData.timebase_num && codecData.timebase_den) {
-        this.estimatedFrameRate = codecData.timebase_den / codecData.timebase_num;
-      }
+      // Reset FPS estimation for new stream (keep default of 30 until estimated)
+      this.lastVideoTimestampUs = -1;
+      this.fpsEstimateSamples = [];
+      this.estimatedFrameRate = 30;
       
       this.emit('metadata', {
         width: codecData.width,

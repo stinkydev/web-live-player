@@ -31,6 +31,13 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, 'dist-demo'),
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'demo/index.html'),
+        player: resolve(__dirname, 'demo/player/index.html'),
+        capture: resolve(__dirname, 'demo/capture/index.html'),
+      },
+    },
   },
   
   // Library build configuration

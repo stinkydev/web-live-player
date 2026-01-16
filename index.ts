@@ -23,7 +23,7 @@ export { FileVideoPlayer, createFilePlayer } from './player/file-player';
 export type { FilePlayerConfig, FilePlayerState, FilePlayerStats, FilePlayMode } from './player/file-player';
 
 // Stream sources
-export { createStandaloneMoQSource, StandaloneMoQSource } from './sources/standalone-moq-source';
+export { createMoQSource, MoQSource } from './sources/moq-source';
 export { WebSocketSource, createWebSocketSource } from './sources/websocket-source';
 export type { WebSocketSourceConfig, VideoMetadata } from './sources/websocket-source';
 
@@ -49,5 +49,8 @@ export { FrameScheduler } from './scheduling/frame-scheduler';
 export type { FrameTiming, LatencyStats, SchedulerStatus, SchedulerConfig, PacketTimingEntry } from './scheduling/frame-scheduler';
 
 // Protocol
-export { SesameBinaryProtocol } from './protocol/sesame-binary-protocol';
+export { SesameBinaryProtocol, FLAG_IS_KEYFRAME, FLAG_HAS_CODEC_DATA, PacketType } from './protocol/sesame-binary-protocol';
 export type { ParsedData, HeaderData, HeaderCodecData } from './protocol/sesame-binary-protocol';
+
+// Capture - Media capture and streaming
+export * from './capture';
