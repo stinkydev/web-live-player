@@ -32,7 +32,7 @@ export default defineConfig({
   plugins: [
     dts({
       include: ['./**/*.ts'],
-      exclude: ['./demo/**/*', './**/*.test.ts', './vitest.config.ts'],
+      exclude: ['./demo/**/*', './**/*.test.ts', './vitest.config.ts', './tmp/**/*'],
     }),
   ],
 });

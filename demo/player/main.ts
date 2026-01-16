@@ -10,7 +10,7 @@ import {
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
-} from '../index';
+} from '../../index';
 
 // DOM Elements
 const videoCanvas = document.getElementById('videoCanvas') as HTMLCanvasElement;

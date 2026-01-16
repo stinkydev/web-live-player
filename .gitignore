@@ -3,3 +3,4 @@ dist
 dist-demo
 .vite
 .DS_Store
+tmp

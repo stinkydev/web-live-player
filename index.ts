@@ -51,3 +51,6 @@ export type { FrameTiming, LatencyStats, SchedulerStatus, SchedulerConfig, Packe
 // Protocol
 export { SesameBinaryProtocol } from './protocol/sesame-binary-protocol';
 export type { ParsedData, HeaderData, HeaderCodecData } from './protocol/sesame-binary-protocol';
+
+// Capture - Media capture and streaming
+export * from './capture';

@@ -32,6 +32,7 @@
     "node_modules",
     "dist",
     "dist-demo",
+    "tmp",
     "vite.config.ts",
     "vite.config.lib.ts"
   ]
