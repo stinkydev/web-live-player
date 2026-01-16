@@ -10,7 +10,6 @@ import {
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
-  PacketTimingEntry,
 } from '../index';
 
 // DOM Elements
