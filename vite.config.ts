@@ -36,6 +36,7 @@ export default defineConfig({
         main: resolve(__dirname, 'demo/index.html'),
         player: resolve(__dirname, 'demo/player/index.html'),
         capture: resolve(__dirname, 'demo/capture/index.html'),
+        chat: resolve(__dirname, 'demo/chat/index.html'),
       },
     },
   },
