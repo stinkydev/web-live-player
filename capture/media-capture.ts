@@ -316,6 +316,20 @@ export class MediaCapture {
   getMediaStream(): MediaStream | undefined {
     return this.mediaStream;
   }
+  
+  /**
+   * Set an external MoQ session on the sink (if it's a MoQCaptureSink)
+   * Allows injecting an existing MoqSessionBroadcaster instance.
+   * @param session - MoqSessionBroadcaster instance to use for broadcasting
+   */
+  setMoQSession(session: any): void {
+    // Check if sink has setMoQSession method (i.e., it's a MoQCaptureSink)
+    if ('setMoQSession' in this.sink && typeof (this.sink as any).setMoQSession === 'function') {
+      (this.sink as any).setMoQSession(session);
+    } else {
+      throw new Error('Sink does not support MoQ session injection');
+    }
+  }
 
   private handleEncodedChunk(event: EncodedChunkEvent): void {
     if (!this.sink.connected) {

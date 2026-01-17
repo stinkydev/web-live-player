@@ -25,10 +25,10 @@ export interface MoQTrackConfig {
  * MoQ-specific sink configuration
  */
 export interface MoQSinkConfig extends CaptureSinkConfig {
-  /** MoQ relay URL */
-  relayUrl: string;
-  /** Namespace for the streams */
-  namespace: string;
+  /** MoQ relay URL (required if session is not provided) */
+  relayUrl?: string;
+  /** Namespace for the streams (required if session is not provided) */
+  namespace?: string;
   /** Video track configuration */
   videoTrack?: MoQTrackConfig;
   /** Audio track configuration */
@@ -37,6 +37,8 @@ export interface MoQSinkConfig extends CaptureSinkConfig {
   dataTracks?: MoQTrackConfig[];
   /** Reconnection delay in ms */
   reconnectionDelay?: number;
+  /** External MoQ session to use (if provided, relayUrl and namespace are ignored) */
+  session?: MoqSessionBroadcaster;
 }
 
 /**
@@ -47,6 +49,7 @@ export class MoQCaptureSink extends BaseCaptureSink {
   private session: MoqSessionBroadcaster | null = null;
   private connecting = false;
   private disposed = false;
+  private sessionOwned = false; // Track if we own the session
   
   // Track current group for video (multiple frames can be in a group)
   private currentVideoGroup: boolean = true; // Start with needing a new group
@@ -58,6 +61,13 @@ export class MoQCaptureSink extends BaseCaptureSink {
   constructor(config: MoQSinkConfig) {
     super(config);
     this.moqConfig = config;
+    
+    // If session is provided, use it
+    if (config.session) {
+      this.session = config.session;
+      this.sessionOwned = false;
+      this._connected = true; // Assume injected session is already connected
+    }
   }
 
   async connect(): Promise<void> {
@@ -65,8 +75,19 @@ export class MoQCaptureSink extends BaseCaptureSink {
       throw new Error('Sink has been disposed');
     }
 
+    // If session is already set (externally injected), just set up event listeners
+    if (this.session && !this.sessionOwned) {
+      this.setupEventListeners();
+      this._connected = true;
+      return;
+    }
+
     if (this.session || this.connecting) {
       return;
+    }
+
+    if (!this.moqConfig.relayUrl || !this.moqConfig.namespace) {
+      throw new Error('relayUrl and namespace are required when not using an injected session');
     }
 
     this.connecting = true;
@@ -114,6 +135,7 @@ export class MoQCaptureSink extends BaseCaptureSink {
       }
 
       this.session = new MoqSessionBroadcaster(sessionConfig, broadcasts);
+      this.sessionOwned = true; // We created this session
 
       // Setup event listeners
       this.setupEventListeners();
@@ -131,8 +153,11 @@ export class MoQCaptureSink extends BaseCaptureSink {
 
   async disconnect(): Promise<void> {
     if (this.session) {
-      this.session.dispose();
-      this.session = null;
+      // Only dispose if we own the session
+      if (this.sessionOwned) {
+        this.session.dispose();
+        this.session = null;
+      }
       this._connected = false;
     }
     // Reset group state - next video frame needs a new group
@@ -234,7 +259,30 @@ export class MoQCaptureSink extends BaseCaptureSink {
 
   dispose(): void {
     this.disposed = true;
+    // Only dispose session if we own it
+    if (this.session && this.sessionOwned) {
+      this.session.dispose();
+    }
     super.dispose();
+  }
+  
+  /**
+   * Set an external MoQ session (dependency injection)
+   * Similar to LiveVideoPlayer.setStreamSource()
+   * @param session - MoqSessionBroadcaster instance to use for broadcasting
+   */
+  setMoQSession(session: MoqSessionBroadcaster): void {
+    // Disconnect from previous session if we own it
+    if (this.session && this.sessionOwned) {
+      this.session.dispose();
+    }
+    
+    this.session = session;
+    this.sessionOwned = false;
+    this._connected = true;
+    
+    // Set up event listeners for the new session
+    this.setupEventListeners();
   }
   
   /**
