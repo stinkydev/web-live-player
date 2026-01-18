@@ -158,22 +158,22 @@ async function startPublishing() {
   // Configure capture using the library
   const config: MediaCaptureConfig = {
     sink: captureSink,
-    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } },
+    video: { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 15 } },
     audio: { sampleRate: { ideal: 48000 }, channelCount: { ideal: 1 } },
     videoEncoder: {
       codec: CodecType.VIDEO_VP8,
-      width: 640,
-      height: 480,
-      frameRate: 24,
-      bitrate: 800_000,
-      keyFrameInterval: 48,
+      width: 320,
+      height: 240,
+      frameRate: 15,
+      bitrate: 200_000,
+      keyFrameInterval: 15,
       latencyMode: 'realtime',
     },
     audioEncoder: {
       codec: CodecType.AUDIO_OPUS,
       sampleRate: 48000,
       channels: 1,
-      bitrate: 64_000,
+      bitrate: 32_000,
       latencyMode: 'realtime',
     },
   };
