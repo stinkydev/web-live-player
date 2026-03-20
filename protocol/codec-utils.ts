@@ -2,7 +2,7 @@
  * Codec utility functions
  */
 
-import type { HeaderCodecData } from './sesame-binary-protocol';
+import type { IMediaCodecData } from '@stinkycomputing/sesame-api-client';
 
 /**
  * Timebase structure for timestamp conversion
@@ -13,11 +13,23 @@ export interface Timebase {
 }
 
 /**
+ * Convert a pts value (number, Long, or bigint) to bigint
+ */
+function toBigInt(value: number | bigint | null | undefined | { toString(): string }): bigint {
+  if (value === null || value === undefined) return 0n;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') return BigInt(Math.floor(value));
+  // Long type from protobufjs or any object with toString (duck-typed)
+  return BigInt(value.toString());
+}
+
+/**
  * Rescale a timestamp from one timebase to another
  */
-export function rescaleTime(pts: bigint, source: Timebase, target: Timebase): number {
+export function rescaleTime(pts: number | bigint | null | undefined | { toString(): string }, source: Timebase, target: Timebase): number {
+  const ptsBigInt = toBigInt(pts);
   // Convert to target timebase: pts * (source.num / source.den) * (target.den / target.num)
-  const scaledPts = (pts * BigInt(source.num) * BigInt(target.den)) / (BigInt(source.den) * BigInt(target.num));
+  const scaledPts = (ptsBigInt * BigInt(source.num) * BigInt(target.den)) / (BigInt(source.den) * BigInt(target.num));
   return Number(scaledPts);
 }
 
@@ -25,18 +37,18 @@ export function rescaleTime(pts: bigint, source: Timebase, target: Timebase): nu
  * Check if codec data has changed
  */
 export function codecDataChanged(
-  current: HeaderCodecData | undefined,
-  newData: HeaderCodecData | undefined
+  current: IMediaCodecData | undefined,
+  newData: IMediaCodecData | undefined
 ): boolean {
   if (!current && !newData) return false;
   if (!current || !newData) return true;
   
   return (
-    current.codec_type !== newData.codec_type ||
+    current.codecType !== newData.codecType ||
     current.width !== newData.width ||
     current.height !== newData.height ||
-    current.codec_profile !== newData.codec_profile ||
-    current.codec_level !== newData.codec_level
+    current.codecProfile !== newData.codecProfile ||
+    current.codecLevel !== newData.codecLevel
   );
 }
 
@@ -60,16 +72,16 @@ export function getCodecName(codecType: number): string {
 /**
  * Get WebCodecs codec string for a given codec data
  */
-export function getCodecString(codecData: HeaderCodecData): string | null {
-  switch (codecData.codec_type) {
+export function getCodecString(codecData: IMediaCodecData): string | null {
+  switch (codecData.codecType) {
     case 3: // VIDEO_AVC (H.264)
       // H.264/AVC codec string: avc1.PPCCLL
-      const profile = codecData.codec_profile > 0 
-        ? codecData.codec_profile.toString(16).padStart(2, '0')
+      const profile = codecData.codecProfile && codecData.codecProfile > 0 
+        ? codecData.codecProfile.toString(16).padStart(2, '0')
         : '42'; // Default to Baseline profile
       const constraint = '00';
-      const level = codecData.codec_level > 0
-        ? codecData.codec_level.toString(16).padStart(2, '0')
+      const level = codecData.codecLevel && codecData.codecLevel > 0
+        ? codecData.codecLevel.toString(16).padStart(2, '0')
         : '1f'; // Default to level 3.1
       return `avc1.${profile}${constraint}${level}`;
     case 4: // VIDEO_HEVC (H.265)

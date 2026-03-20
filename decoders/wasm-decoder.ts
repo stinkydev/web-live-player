@@ -7,10 +7,10 @@
 
 // @ts-ignore - Worker import with inline for library bundling
 import H264Worker from './wasm-worker/H264NALDecoder.worker?worker&inline';
-import { ParsedData } from '../protocol/sesame-binary-protocol';
 import { rescaleTime } from '../protocol/codec-utils';
 import type { YUVFrame } from '../types';
 import type { IVideoDecoder } from './decoder-interface';
+import { ParsedFrame } from '@stinkycomputing/sesame-api-client';
 
 // Re-export for backwards compatibility
 export type { YUVFrame } from '../types';
@@ -57,7 +57,7 @@ export class WasmDecoder implements IVideoDecoder {
   /**
    * Configure the decoder (initializes the worker)
    */
-  async configure(_codecData: { codec_type: number; width: number; height: number }): Promise<void> {
+  async configure(_codecData: any): Promise<void> {
     // Dispose any existing worker first
     if (this.worker) {
       this.worker.terminate();
@@ -101,7 +101,7 @@ export class WasmDecoder implements IVideoDecoder {
   /**
    * Decode a binary packet (same interface as WebCodecsDecoder)
    */
-  decodeBinary(data: ParsedData): void {
+  decodeBinary(data: ParsedFrame): void {
     if (!this.worker || !this.configured || !data.header || !data.payload) {
       return;
     }
@@ -111,8 +111,8 @@ export class WasmDecoder implements IVideoDecoder {
     const arr = new Uint8Array(data.payload);
     
     // Convert timestamp to microseconds
-    const sourceTimebase = data.codec_data?.timebase_den && data.codec_data?.timebase_num
-      ? { num: data.codec_data.timebase_num, den: data.codec_data.timebase_den }
+    const sourceTimebase = data.header.codecData?.timebaseDen && data.header.codecData?.timebaseNum
+      ? { num: data.header.codecData.timebaseNum, den: data.header.codecData.timebaseDen }
       : { num: 1, den: 1000000 };
     const microsecondTimebase = { num: 1, den: 1000000 };
     const pts = rescaleTime(data.header.pts, sourceTimebase, microsecondTimebase);

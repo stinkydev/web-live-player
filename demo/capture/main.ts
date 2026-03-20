@@ -11,6 +11,7 @@ import {
   ICaptureSink,
   CodecType,
 } from '../../index';
+import { sesame } from '@stinkycomputing/sesame-api-client';
 
 // DOM Elements - Preview
 const previewVideo = document.getElementById('previewVideo') as HTMLVideoElement;
@@ -119,21 +120,21 @@ function formatDuration(ms: number): string {
 }
 
 // Get video codec type
-function getVideoCodecType(): CodecType {
+function getVideoCodecType(): sesame.v1.wire.CodecType {
   switch (videoCodecSelect.value) {
-    case 'vp8': return CodecType.VIDEO_VP8;
-    case 'vp9': return CodecType.VIDEO_VP9;
+    case 'vp8': return CodecType.CODEC_TYPE_VIDEO_VP8;
+    case 'vp9': return CodecType.CODEC_TYPE_VIDEO_VP9;
     case 'avc':
-    default: return CodecType.VIDEO_AVC;
+    default: return CodecType.CODEC_TYPE_VIDEO_AVC;
   }
 }
 
 // Get audio codec type
-function getAudioCodecType(): CodecType {
+function getAudioCodecType(): sesame.v1.wire.CodecType {
   switch (audioCodecSelect.value) {
-    case 'aac': return CodecType.AUDIO_AAC;
+    case 'aac': return CodecType.CODEC_TYPE_AUDIO_AAC;
     case 'opus':
-    default: return CodecType.AUDIO_OPUS;
+    default: return CodecType.CODEC_TYPE_AUDIO_OPUS;
   }
 }
 

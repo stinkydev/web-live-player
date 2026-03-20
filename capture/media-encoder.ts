@@ -133,7 +133,7 @@ export class MediaStreamEncoder {
     };
 
     // Add Opus-specific config if using Opus
-    if (options.codec === CodecType.AUDIO_OPUS) {
+    if (options.codec === CodecType.CODEC_TYPE_AUDIO_OPUS) {
       // @ts-ignore - opus config not in standard types
       audioConfig.opus = {
         frameDuration: 20000,

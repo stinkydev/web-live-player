@@ -5,7 +5,7 @@
  * Implementations can send data over WebSocket, MoQ, or other protocols.
  */
 
-import { CodecType } from './capture-types';
+import { sesame } from '@stinkycomputing/sesame-api-client';
 
 /**
  * Serialized packet ready for transmission
@@ -63,7 +63,7 @@ export interface ICaptureSink {
  */
 export interface VideoStreamConfig {
   /** Video codec type */
-  codec: CodecType;
+  codec: sesame.v1.wire.CodecType;
   /** Video width */
   width: number;
   /** Video height */
@@ -79,7 +79,7 @@ export interface VideoStreamConfig {
  */
 export interface AudioStreamConfig {
   /** Audio codec type */
-  codec: CodecType;
+  codec: sesame.v1.wire.CodecType;
   /** Sample rate in Hz */
   sampleRate: number;
   /** Number of channels */

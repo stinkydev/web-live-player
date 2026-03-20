@@ -5,16 +5,16 @@
  * browser media devices and encoding them for transmission.
  */
 
-import { CodecType, PacketType } from '../protocol/sesame-binary-protocol';
+import { CodecType, sesame } from "@stinkycomputing/sesame-api-client";
 
-// Re-export CodecType for convenience
-export { CodecType, PacketType };
+// Re-export CodecType for use in other modules
+export { CodecType };
 
 /**
  * Video codec configuration options
  */
 export interface VideoEncoderOptions {
-  codec: CodecType;
+  codec: sesame.v1.wire.CodecType;
   width?: number;
   height?: number;
   bitrate?: number;
@@ -27,7 +27,7 @@ export interface VideoEncoderOptions {
  * Audio codec configuration options
  */
 export interface AudioEncoderOptions {
-  codec: CodecType;
+  codec: sesame.v1.wire.CodecType;
   sampleRate?: number;
   channels?: number;
   bitrate?: number;
@@ -66,14 +66,14 @@ export const DEFAULT_CAPTURE_CONFIG: Required<CaptureConfig> = {
     channelCount: { ideal: 2 },
   },
   videoEncoder: {
-    codec: CodecType.VIDEO_VP9,
+    codec: CodecType.CODEC_TYPE_VIDEO_VP9,
     bitrate: 2_000_000,
     frameRate: 30,
     keyFrameInterval: 60,
     latencyMode: 'realtime',
   },
   audioEncoder: {
-    codec: CodecType.AUDIO_OPUS,
+    codec: CodecType.CODEC_TYPE_AUDIO_OPUS,
     sampleRate: 48000,
     channels: 2,
     bitrate: 128_000,
@@ -154,23 +154,23 @@ export interface CaptureEvents {
 /**
  * Convert CodecType to WebCodecs codec string
  */
-export function codecTypeToString(codec: CodecType): string {
+export function codecTypeToString(codec: sesame.v1.wire.CodecType): string {
   switch (codec) {
-    case CodecType.VIDEO_VP8:
+    case CodecType.CODEC_TYPE_VIDEO_VP8:
       return 'vp8';
-    case CodecType.VIDEO_VP9:
+    case CodecType.CODEC_TYPE_VIDEO_VP9:
       return 'vp09.00.10.08';
-    case CodecType.VIDEO_AVC:
+    case CodecType.CODEC_TYPE_VIDEO_AVC:
       return 'avc1.64001f';
-    case CodecType.VIDEO_HEVC:
+    case CodecType.CODEC_TYPE_VIDEO_HEVC:
       return 'hvc1.1.L0.0';
-    case CodecType.VIDEO_AV1:
+    case CodecType.CODEC_TYPE_VIDEO_AV1:
       return 'av01.0.05M.08';
-    case CodecType.AUDIO_OPUS:
+    case CodecType.CODEC_TYPE_AUDIO_OPUS:
       return 'opus';
-    case CodecType.AUDIO_AAC:
+    case CodecType.CODEC_TYPE_AUDIO_AAC:
       return 'mp4a.40.2';
-    case CodecType.AUDIO_PCM:
+    case CodecType.CODEC_TYPE_AUDIO_PCM:
       return 'pcm';
     default:
       throw new Error(`Unsupported codec type: ${codec}`);
@@ -180,13 +180,13 @@ export function codecTypeToString(codec: CodecType): string {
 /**
  * Check if a codec is a video codec
  */
-export function isVideoCodec(codec: CodecType): boolean {
-  return codec >= CodecType.VIDEO_VP8 && codec <= CodecType.VIDEO_AV1;
+export function isVideoCodec(codec: sesame.v1.wire.CodecType): boolean {
+  return codec >= CodecType.CODEC_TYPE_VIDEO_VP8 && codec <= CodecType.CODEC_TYPE_VIDEO_AV1;
 }
 
 /**
  * Check if a codec is an audio codec
  */
-export function isAudioCodec(codec: CodecType): boolean {
-  return codec >= CodecType.AUDIO_OPUS && codec <= CodecType.AUDIO_PCM;
+export function isAudioCodec(codec: sesame.v1.wire.CodecType): boolean {
+  return codec >= CodecType.CODEC_TYPE_AUDIO_OPUS && codec <= CodecType.CODEC_TYPE_AUDIO_PCM;
 }

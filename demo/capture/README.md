@@ -41,7 +41,7 @@ const capture = new MediaCapture({
     channelCount: { ideal: 2 },
   },
   videoEncoder: {
-    codec: CodecType.VIDEO_VP8,
+    codec: CodecType.CODEC_TYPE_VIDEO_VP8,
     width: 1280,
     height: 720,
     frameRate: 30,
@@ -50,7 +50,7 @@ const capture = new MediaCapture({
     latencyMode: 'realtime',
   },
   audioEncoder: {
-    codec: CodecType.AUDIO_OPUS,
+    codec: CodecType.CODEC_TYPE_AUDIO_OPUS,
     sampleRate: 48000,
     channels: 2,
     bitrate: 128_000,
@@ -103,19 +103,19 @@ await capture.start();
 | `MoQCaptureSink` | Sends encoded data over MoQ transport |
 | `WebSocketCaptureSink` | Sends encoded data over WebSocket |
 | `CodecType` | Enum for video/audio codec selection |
-| `SesameBinaryProtocol` | Binary protocol for packet serialization |
+| `WireProtocol` | Protobuf-based wire protocol for packet serialization |
 
 ## Supported Codecs
 
 **Video:**
-- VP8 (`CodecType.VIDEO_VP8`)
-- VP9 (`CodecType.VIDEO_VP9`)
-- H.264/AVC (`CodecType.VIDEO_AVC`)
-- H.265/HEVC (`CodecType.VIDEO_HEVC`)
+- VP8 (`CodecType.CODEC_TYPE_VIDEO_VP8`)
+- VP9 (`CodecType.CODEC_TYPE_VIDEO_VP9`)
+- H.264/AVC (`CodecType.CODEC_TYPE_VIDEO_AVC`)
+- H.265/HEVC (`CodecType.CODEC_TYPE_VIDEO_HEVC`)
 
 **Audio:**
-- Opus (`CodecType.AUDIO_OPUS`)
-- AAC (`CodecType.AUDIO_AAC`)
+- Opus (`CodecType.CODEC_TYPE_AUDIO_OPUS`)
+- AAC (`CodecType.CODEC_TYPE_AUDIO_AAC`)
 
 ## Running the Demo
 

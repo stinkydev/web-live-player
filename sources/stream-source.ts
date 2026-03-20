@@ -7,7 +7,7 @@
  * - Custom protocols
  */
 
-import type { ParsedData } from '../protocol/sesame-binary-protocol';
+import { ParsedFrame } from '@stinkycomputing/sesame-api-client';
 
 /**
  * Event data emitted when stream data is received
@@ -15,7 +15,7 @@ import type { ParsedData } from '../protocol/sesame-binary-protocol';
 export interface StreamDataEvent {
   trackName: string;
   streamType: 'video' | 'audio' | 'data';
-  data: ParsedData;
+  data: ParsedFrame;
 }
 
 /**

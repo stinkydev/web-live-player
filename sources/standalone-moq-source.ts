@@ -6,7 +6,7 @@
  */
 
 import { BaseStreamSource, StreamDataEvent } from './stream-source';
-import { SesameBinaryProtocol } from '../protocol/sesame-binary-protocol';
+import { WireProtocol, ParsedFrame } from '@stinkycomputing/sesame-api-client';
 import type { MoQSessionConfig, SubscriptionConfig, MoqSessionSubscriber } from 'stinky-moq-js';
 
 /**
@@ -139,7 +139,7 @@ export class MoQSource extends BaseStreamSource {
     if (streamType === 'video' || streamType === 'audio') {
       // Parse binary protocol for video/audio
       try {
-        const parsedData = SesameBinaryProtocol.parseData(data);
+        const parsedData = WireProtocol.parse(data);
         
         if (!parsedData.valid) {
           console.warn(`Invalid ${streamType} packet format for track ${trackName}`);
@@ -164,11 +164,8 @@ export class MoQSource extends BaseStreamSource {
         data: {
           valid: true,
           header: null,
-          metadata: null,
-          codec_data: null,
           payload: data,
-          payload_size: data.length,
-        },
+        } as ParsedFrame,
       };
       
       this.emit('data', event);

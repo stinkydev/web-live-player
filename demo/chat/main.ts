@@ -161,7 +161,7 @@ async function startPublishing() {
     video: { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 15 } },
     audio: { sampleRate: { ideal: 48000 }, channelCount: { ideal: 1 } },
     videoEncoder: {
-      codec: CodecType.VIDEO_VP8,
+      codec: CodecType.CODEC_TYPE_VIDEO_VP8,
       width: 320,
       height: 240,
       frameRate: 15,
@@ -170,7 +170,7 @@ async function startPublishing() {
       latencyMode: 'realtime',
     },
     audioEncoder: {
-      codec: CodecType.AUDIO_OPUS,
+      codec: CodecType.CODEC_TYPE_AUDIO_OPUS,
       sampleRate: 48000,
       channels: 1,
       bitrate: 32_000,
