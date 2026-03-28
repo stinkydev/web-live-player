@@ -365,26 +365,28 @@ export class MediaCapture {
     const isVideo = event.type === 'video';
     const hdr: sesame.v1.wire.IFrameHeader = {
       type: isVideo ? sesame.v1.wire.FrameType.FRAME_TYPE_VIDEO : sesame.v1.wire.FrameType.FRAME_TYPE_AUDIO,
-      pts: BigInt(event.timestamp),
-      keyframe: event.keyframe,
+      media: {
+        pts: BigInt(event.timestamp),
+        keyframe: event.keyframe,
+        codecData: {
+          codecType: isVideo ? CodecType.CODEC_TYPE_VIDEO_VP9 : CodecType.CODEC_TYPE_AUDIO_OPUS,
+          codecProfile: 0,
+          codecLevel: 0,
+          width: this.videoMetadata?.width || 0,
+          height: this.videoMetadata?.height || 0,
+          channels: this.audioMetadata?.channels || 0,
+          sampleRate: this.audioMetadata?.sampleRate || 0,
+          bitDepth: 8,
+          timebaseNum: 1,
+          timebaseDen: 1000000,
+        }
+      },
       routingMetadata: this.config.topic ? JSON.stringify({ metadata: this.config.topic }) : '',
-      codecData: {
-        codecType: isVideo ? CodecType.CODEC_TYPE_VIDEO_VP9 : CodecType.CODEC_TYPE_AUDIO_OPUS,
-        codecProfile: 0,
-        codecLevel: 0,
-        width: this.videoMetadata?.width || 0,
-        height: this.videoMetadata?.height || 0,
-        channels: this.audioMetadata?.channels || 0,
-        sampleRate: this.audioMetadata?.sampleRate || 0,
-        bitDepth: 8,
-        timebaseNum: 1,
-        timebaseDen: 1000000,
-      }
     };
 
     // Apply audio timestamp offset
     if (!isVideo && this.config.audioTimestampOffset) {
-      hdr.pts += BigInt(this.config.audioTimestampOffset);
+      hdr.media!.pts += BigInt(this.config.audioTimestampOffset);
     }
 
     if (this.config.topic) {

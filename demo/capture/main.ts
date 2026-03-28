@@ -120,7 +120,7 @@ function formatDuration(ms: number): string {
 }
 
 // Get video codec type
-function getVideoCodecType(): sesame.v1.wire.CodecType {
+function getVideoCodecType(): sesame.v1.common.CodecType {
   switch (videoCodecSelect.value) {
     case 'vp8': return CodecType.CODEC_TYPE_VIDEO_VP8;
     case 'vp9': return CodecType.CODEC_TYPE_VIDEO_VP9;
@@ -130,7 +130,7 @@ function getVideoCodecType(): sesame.v1.wire.CodecType {
 }
 
 // Get audio codec type
-function getAudioCodecType(): sesame.v1.wire.CodecType {
+function getAudioCodecType(): sesame.v1.common.CodecType {
   switch (audioCodecSelect.value) {
     case 'aac': return CodecType.CODEC_TYPE_AUDIO_AAC;
     case 'opus':

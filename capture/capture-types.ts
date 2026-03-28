@@ -14,7 +14,7 @@ export { CodecType };
  * Video codec configuration options
  */
 export interface VideoEncoderOptions {
-  codec: sesame.v1.wire.CodecType;
+  codec: sesame.v1.common.CodecType;
   width?: number;
   height?: number;
   bitrate?: number;
@@ -27,7 +27,7 @@ export interface VideoEncoderOptions {
  * Audio codec configuration options
  */
 export interface AudioEncoderOptions {
-  codec: sesame.v1.wire.CodecType;
+  codec: sesame.v1.common.CodecType;
   sampleRate?: number;
   channels?: number;
   bitrate?: number;
@@ -154,7 +154,7 @@ export interface CaptureEvents {
 /**
  * Convert CodecType to WebCodecs codec string
  */
-export function codecTypeToString(codec: sesame.v1.wire.CodecType): string {
+export function codecTypeToString(codec: sesame.v1.common.CodecType): string {
   switch (codec) {
     case CodecType.CODEC_TYPE_VIDEO_VP8:
       return 'vp8';
@@ -180,13 +180,13 @@ export function codecTypeToString(codec: sesame.v1.wire.CodecType): string {
 /**
  * Check if a codec is a video codec
  */
-export function isVideoCodec(codec: sesame.v1.wire.CodecType): boolean {
+export function isVideoCodec(codec: sesame.v1.common.CodecType): boolean {
   return codec >= CodecType.CODEC_TYPE_VIDEO_VP8 && codec <= CodecType.CODEC_TYPE_VIDEO_AV1;
 }
 
 /**
  * Check if a codec is an audio codec
  */
-export function isAudioCodec(codec: sesame.v1.wire.CodecType): boolean {
+export function isAudioCodec(codec: sesame.v1.common.CodecType): boolean {
   return codec >= CodecType.CODEC_TYPE_AUDIO_OPUS && codec <= CodecType.CODEC_TYPE_AUDIO_PCM;
 }

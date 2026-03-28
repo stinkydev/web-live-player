@@ -197,15 +197,15 @@ export class WebCodecsDecoder implements IVideoDecoder {
     }
     
     // Convert timestamp to microseconds
-    const sourceTimebase = data.header.codecData?.timebaseDen && data.header.codecData?.timebaseNum
-      ? { num: data.header.codecData.timebaseNum, den: data.header.codecData.timebaseDen }
+    const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
+      ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
       : { num: 1, den: 1000000 };
     const microsecondTimebase = { num: 1, den: 1000000 };
-    const pts = rescaleTime(data.header.pts, sourceTimebase, microsecondTimebase);
+    const pts = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
     
     const chunk = new EncodedVideoChunk({
       timestamp: pts,
-      type: data.header.keyframe ? 'key' : 'delta',
+      type: data.header.media?.keyframe ? 'key' : 'delta',
       data: data.payload ?? new Uint8Array(0),
     });
     

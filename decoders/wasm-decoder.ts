@@ -111,11 +111,11 @@ export class WasmDecoder implements IVideoDecoder {
     const arr = new Uint8Array(data.payload);
     
     // Convert timestamp to microseconds
-    const sourceTimebase = data.header.codecData?.timebaseDen && data.header.codecData?.timebaseNum
-      ? { num: data.header.codecData.timebaseNum, den: data.header.codecData.timebaseDen }
+    const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
+      ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
       : { num: 1, den: 1000000 };
     const microsecondTimebase = { num: 1, den: 1000000 };
-    const pts = rescaleTime(data.header.pts, sourceTimebase, microsecondTimebase);
+    const pts = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
     
     // Queue the frame (matching Elmo's working implementation)
     this.pendingFrames.push(arr);

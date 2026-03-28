@@ -567,24 +567,24 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       return;
     }
     
-    if (!data.header.codecData) {
+    if (!data.header.media?.codecData) {
       return;
     }
     
-    const isKeyframe = !!(data.header.keyframe);
+    const isKeyframe = !!(data.header.media?.keyframe);
     
     // Check for codec changes
-    if (codecDataChanged(this.currentCodecData, data.header.codecData)) {
+    if (codecDataChanged(this.currentCodecData, data.header.media?.codecData)) {
       // Need keyframe to reconfigure
       if (!isKeyframe) {
         this.logger.debug('Waiting for keyframe (codec change)');
         return;
       }
       
-      this.currentCodecData = data.header.codecData;
+      this.currentCodecData = data.header.media?.codecData;
       this.isConfiguring = true;
       this.pendingDuringConfig = [data]; // Queue the keyframe itself
-      await this.configureDecoder(data.header.codecData);
+      await this.configureDecoder(data.header.media?.codecData);
       this.isConfiguring = false;
       this.waitingForKeyframe = true;
       
@@ -604,21 +604,21 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     
     // Queue frames that arrive during configuration
     if (this.isConfiguring) {
-      this.logger.debug(`Queueing frame pts=${data.header.pts} during configuration`);
+      this.logger.debug(`Queueing frame pts=${data.header.media?.pts} during configuration`);
       this.pendingDuringConfig.push(data);
       return;
     }
     
     // Ensure decoder is ready
     if (!this.decoder || this.decoder.state !== 'configured') {
-      this.logger.warn(`Dropping frame pts=${data.header.pts}: decoder not ready (state=${this.decoder?.state ?? 'null'})`);
+      this.logger.warn(`Dropping frame pts=${data.header.media?.pts}: decoder not ready (state=${this.decoder?.state ?? 'null'})`);
       return;
     }
     
     // Wait for keyframe after configuration or flush
     if (this.waitingForKeyframe) {
       if (!isKeyframe) {
-        this.logger.debug(`Dropping frame pts=${data.header.pts}: waiting for keyframe`);
+        this.logger.debug(`Dropping frame pts=${data.header.media?.pts}: waiting for keyframe`);
         const now = Date.now();
         // Log occasionally to avoid spam
         if (!this.lastWaitingForKeyframeLog || now - this.lastWaitingForKeyframeLog > 1000) {
@@ -644,11 +644,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       // Record arrival time for latency tracking
       // Use rescaled PTS (microseconds) as key to match what decoder outputs
       const arrivalTime = performance.now();
-      const sourceTimebase = data.header.codecData?.timebaseDen && data.header.codecData?.timebaseNum
-        ? { num: data.header.codecData.timebaseNum, den: data.header.codecData.timebaseDen }
+      const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
+        ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
         : { num: 1, den: 1000000 };
       const microsecondTimebase = { num: 1, den: 1000000 };
-      const timestampUs = rescaleTime(data.header!.pts, sourceTimebase, microsecondTimebase);
+      const timestampUs = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
       this.arrivalTimes.set(timestampUs, arrivalTime);
       this.keyframeStatus.set(timestampUs, isKeyframe);
       
@@ -695,8 +695,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     
     // Check for codec changes
     const currentCodecData = this.audioCodecData ?? undefined;
-    if (data.header?.codecData && codecDataChanged(currentCodecData, data.header.codecData)) {
-      this.audioCodecData = data.header.codecData;
+    if (data.header?.media?.codecData && codecDataChanged(currentCodecData, data.header.media.codecData)) {
+      this.audioCodecData = data.header.media.codecData;
       
       // Dispose old player if exists
       if (this.audioPlayer) {
@@ -716,17 +716,17 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       });
       
       // Initialize with codec data
-      await this.audioPlayer.init(data.header.codecData);
+      await this.audioPlayer.init(data.header.media?.codecData);
       
       // Start playback
       this.audioPlayer.start();
-      this.logger.info(`Audio player started: ${data.header.codecData.codecType}, ${data.header.codecData.sampleRate}Hz, ${data.header.codecData.channels}ch`);
+      this.logger.info(`Audio player started: ${data.header.media?.codecData?.codecType}, ${data.header.media?.codecData?.sampleRate}Hz, ${data.header.media?.codecData?.channels}ch`);
     }
     
     // Decode the audio frame
     if (this.audioPlayer && data.payload && data.header) {
       // Pass PTS directly as bigint (microseconds)
-      this.audioPlayer.decode(data.payload, data.header.pts);
+      this.audioPlayer.decode(data.payload, data.header.media?.pts);
     }
   }
   
@@ -785,7 +785,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.emit('metadata', {
         width: codecData.width,
         height: codecData.height,
-        codec: this.getCodecName(codecData.codecType || sesame.v1.wire.CodecType.CODEC_TYPE_VIDEO_AVC),
+        codec: this.getCodecName(codecData.codecType || sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AVC),
       });
       
     } catch (error) {
@@ -795,11 +795,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
   }
   
-  private getCodecName(codecType: sesame.v1.wire.CodecType): string {
+  private getCodecName(codecType: sesame.v1.common.CodecType): string {
     switch (codecType) {
-      case sesame.v1.wire.CodecType.CODEC_TYPE_VIDEO_AVC: return 'H.264';
-      case sesame.v1.wire.CodecType.CODEC_TYPE_VIDEO_HEVC: return 'HEVC';
-      case sesame.v1.wire.CodecType.CODEC_TYPE_VIDEO_AV1: return 'AV1';
+      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AVC: return 'H.264';
+      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_HEVC: return 'HEVC';
+      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AV1: return 'AV1';
       default: return 'Unknown';
     }
   }

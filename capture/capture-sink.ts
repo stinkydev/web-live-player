@@ -63,7 +63,7 @@ export interface ICaptureSink {
  */
 export interface VideoStreamConfig {
   /** Video codec type */
-  codec: sesame.v1.wire.CodecType;
+  codec: sesame.v1.common.CodecType;
   /** Video width */
   width: number;
   /** Video height */
@@ -79,7 +79,7 @@ export interface VideoStreamConfig {
  */
 export interface AudioStreamConfig {
   /** Audio codec type */
-  codec: sesame.v1.wire.CodecType;
+  codec: sesame.v1.common.CodecType;
   /** Sample rate in Hz */
   sampleRate: number;
   /** Number of channels */
