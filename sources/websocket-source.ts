@@ -1,12 +1,12 @@
 /**
  * WebSocket Stream Source
  * 
- * Implements IStreamSource for WebSocket-based video streaming.
- * Uses the Sesame Binary Protocol for parsing video/audio frames.
+ * Implements IStreamSource for WebSocket-based live video streaming.
+ * Uses the Sesame Wire Protocol for parsing video/audio frames.
  */
 
 import { BaseStreamSource, StreamDataEvent } from './stream-source';
-import { SesameBinaryProtocol, PacketType } from '../protocol/sesame-binary-protocol';
+import { WireProtocol, FrameType } from '@stinkycomputing/sesame-api-client';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MIN_KEYFRAME_REQUEST_INTERVAL_MS = 1000;
@@ -31,17 +31,6 @@ export interface WebSocketSourceConfig {
   reconnectDelay?: number;
 }
 
-/**
- * Video metadata returned from the server
- */
-export interface VideoMetadata {
-  width: number;
-  height: number;
-  frameRate?: number;
-  duration?: number;
-  codec?: string;
-}
-
 interface MessageWaiter {
   resolve: (value: any) => void;
   reject: (error: Error) => void;
@@ -51,10 +40,8 @@ interface MessageWaiter {
 
 interface Command {
   id?: number;
-  type: 'load' | 'seek' | 'read' | 'live' | 'unload' | 'keyframe';
-  paramNum?: number;
+  type: 'live' | 'keyframe';
   filename?: string;
-  project?: string;
 }
 
 interface Response {
@@ -64,7 +51,7 @@ interface Response {
 }
 
 /**
- * WebSocket-based stream source for live and file-based video playback.
+ * WebSocket-based stream source for live video playback.
  * 
  * @example
  * ```typescript
@@ -84,8 +71,6 @@ export class WebSocketSource extends BaseStreamSource {
   private messageWaiters: MessageWaiter[] = [];
   private requestId: number = 0;
   private timeoutCheckInterval: number | null = null;
-  private ignoreCmdsBelow = 0;
-  private isLiveStream: boolean = false;
   private config: Required<WebSocketSourceConfig>;
   private lastKeyframeRequest: number = 0;
   private currentTrackName: string = 'default';
@@ -209,58 +194,17 @@ export class WebSocketSource extends BaseStreamSource {
 
   /**
    * Load a live stream by ID
+   * Note: Metadata is received via video stream codec data, not from this call
    */
-  async loadLive(streamId: string): Promise<VideoMetadata> {
-    this.isLiveStream = true;
+  async loadLive(streamId: string): Promise<void> {
     this.currentTrackName = streamId;
-    this.ignoreCmdsBelow = this.requestId;
-    return this.request({ type: 'live', filename: streamId });
+    await this.request({ type: 'live', filename: streamId });
   }
 
   /**
-   * Load a video file
-   */
-  async loadFile(project: string, filename: string): Promise<VideoMetadata> {
-    this.isLiveStream = false;
-    this.currentTrackName = filename;
-    this.ignoreCmdsBelow = this.requestId;
-    return this.request({ type: 'load', filename, project });
-  }
-
-  /**
-   * Seek to a position in the video (file playback only)
-   */
-  async seek(positionMs: number): Promise<void> {
-    if (this.isLiveStream) {
-      throw new Error('Cannot seek in live stream');
-    }
-    return this.request({ type: 'seek', paramNum: positionMs });
-  }
-
-  /**
-   * Request more packets from the server (file playback)
-   */
-  async read(packetCount: number): Promise<void> {
-    return this.request({ type: 'read', paramNum: packetCount });
-  }
-
-  /**
-   * Unload the current stream
-   */
-  async unload(): Promise<void> {
-    this.isLiveStream = false;
-    return this.request({ type: 'unload' });
-  }
-
-  /**
-   * Request a keyframe (live streams only)
+   * Request a keyframe
    */
   requestKeyframe(): void {
-    if (!this.isLiveStream) {
-      console.warn('Keyframe request ignored: not a live stream');
-      return;
-    }
-
     const now = Date.now();
     if (now - this.lastKeyframeRequest < MIN_KEYFRAME_REQUEST_INTERVAL_MS) {
       return; // Throttle keyframe requests
@@ -270,13 +214,6 @@ export class WebSocketSource extends BaseStreamSource {
     this.request({ type: 'keyframe' }).catch(() => {
       // Ignore errors for keyframe requests
     });
-  }
-
-  /**
-   * Flush pending requests (useful when seeking)
-   */
-  flush(): void {
-    this.ignoreCmdsBelow = this.requestId;
   }
 
   /**
@@ -351,25 +288,18 @@ export class WebSocketSource extends BaseStreamSource {
 
   private handleBinaryData(data: ArrayBuffer): void {
     const dataArray = new Uint8Array(data);
-    const parsedData = SesameBinaryProtocol.parseData(dataArray);
+    const parsedData = WireProtocol.parse(dataArray);
 
     if (!parsedData.valid || !parsedData.header) {
       console.warn('Invalid binary packet received');
       return;
     }
 
-    // Skip outdated packets for file playback
-    if (!this.isLiveStream && parsedData.header.id !== undefined) {
-      if (Number(parsedData.header.id) < this.ignoreCmdsBelow) {
-        return;
-      }
-    }
-
     // Determine stream type from packet type
     let streamType: 'video' | 'audio' | 'data' = 'data';
-    if (parsedData.header.type === PacketType.VIDEO_FRAME) {
+    if (parsedData.header.type === FrameType.FRAME_TYPE_VIDEO) {
       streamType = 'video';
-    } else if (parsedData.header.type === PacketType.AUDIO_FRAME) {
+    } else if (parsedData.header.type === FrameType.FRAME_TYPE_AUDIO) {
       streamType = 'audio';
     }
 
@@ -397,8 +327,8 @@ export class WebSocketSource extends BaseStreamSource {
     this.reconnectTimeout = window.setTimeout(async () => {
       try {
         await this.connect();
-        // Optionally reload the stream
-        if (this.isLiveStream && this.currentTrackName) {
+        // Reload the stream if we had one
+        if (this.currentTrackName && this.currentTrackName !== 'default') {
           await this.loadLive(this.currentTrackName);
         }
       } catch (err) {

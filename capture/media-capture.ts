@@ -11,19 +11,11 @@ import {
   CaptureStats,
   EncodedChunkEvent,
   AudioLevelEvent,
-  CodecType,
-  PacketType,
   DEFAULT_CAPTURE_CONFIG,
 } from './capture-types';
 import { MediaStreamEncoder } from './media-encoder';
 import { ICaptureSink, SerializedPacket } from './capture-sink';
-import {
-  SesameBinaryProtocol,
-  FLAG_HAS_CODEC_DATA,
-  FLAG_HAS_METADATA,
-  FLAG_IS_KEYFRAME,
-  HeaderCodecData,
-} from '../protocol/sesame-binary-protocol';
+import { CodecType, sesame, WireProtocol } from '@stinkycomputing/sesame-api-client';
 
 /**
  * Full media capture configuration
@@ -371,54 +363,37 @@ export class MediaCapture {
 
   private createPacket(event: EncodedChunkEvent, chunkData: Uint8Array): ArrayBuffer {
     const isVideo = event.type === 'video';
-    const packetType = isVideo ? PacketType.VIDEO_FRAME : PacketType.AUDIO_FRAME;
-    const codecType = isVideo 
-      ? (this.config.videoEncoder?.codec ?? CodecType.VIDEO_VP9)
-      : (this.config.audioEncoder?.codec ?? CodecType.AUDIO_OPUS);
-
-    // Apply audio timestamp offset
-    let timestamp = event.timestamp;
-    if (!isVideo && this.config.audioTimestampOffset) {
-      timestamp += this.config.audioTimestampOffset;
-    }
-
-    // Build codec data
-    const codecData: HeaderCodecData = {
-      sample_rate: this.audioMetadata?.sampleRate || 0,
-      codec_profile: 0,
-      codec_level: 0,
-      width: this.videoMetadata?.width || 0,
-      height: this.videoMetadata?.height || 0,
-      codec_type: codecType,
-      channels: this.audioMetadata?.channels || 0,
-      bit_depth: 8,
-      timebase_num: 1,
-      timebase_den: 1000000,
-      reserved: 0,
+    const hdr: sesame.v1.wire.IFrameHeader = {
+      type: isVideo ? sesame.v1.wire.FrameType.FRAME_TYPE_VIDEO : sesame.v1.wire.FrameType.FRAME_TYPE_AUDIO,
+      media: {
+        pts: BigInt(event.timestamp),
+        keyframe: event.keyframe,
+        codecData: {
+          codecType: isVideo ? CodecType.CODEC_TYPE_VIDEO_VP9 : CodecType.CODEC_TYPE_AUDIO_OPUS,
+          codecProfile: 0,
+          codecLevel: 0,
+          width: this.videoMetadata?.width || 0,
+          height: this.videoMetadata?.height || 0,
+          channels: this.audioMetadata?.channels || 0,
+          sampleRate: this.audioMetadata?.sampleRate || 0,
+          bitDepth: 8,
+          timebaseNum: 1,
+          timebaseDen: 1000000,
+        }
+      },
+      routingMetadata: this.config.topic ? JSON.stringify({ metadata: this.config.topic }) : '',
     };
 
-    // Set flags
-    let flags = FLAG_HAS_CODEC_DATA;
+    // Apply audio timestamp offset
+    if (!isVideo && this.config.audioTimestampOffset) {
+      hdr.media!.pts += BigInt(this.config.audioTimestampOffset);
+    }
+
     if (this.config.topic) {
-      flags |= FLAG_HAS_METADATA;
+      hdr.routingMetadata = JSON.stringify({ metadata: this.config.topic });
     }
-    if (event.keyframe) {
-      flags |= FLAG_IS_KEYFRAME;
-    }
-
-    // Create header
-    const header = SesameBinaryProtocol.initHeader(
-      packetType,
-      flags,
-      BigInt(timestamp),
-      BigInt(0)
-    );
-
-    // Create metadata
-    const metadata = this.config.topic ? { metadata: this.config.topic } : null;
-
     // Serialize
-    const serializedData = SesameBinaryProtocol.serialize(header, metadata, codecData, chunkData);
+    const serializedData = WireProtocol.serialize(hdr, chunkData);
 
     if (!serializedData) {
       throw new Error('Failed to serialize packet');

@@ -5,7 +5,7 @@
  * (WebCodecs and WASM).
  */
 
-import type { ParsedData, HeaderCodecData } from '../protocol/sesame-binary-protocol';
+import { IMediaCodecData, ParsedFrame } from '@stinkycomputing/sesame-api-client';
 import type { YUVFrame } from '../types';
 
 /**
@@ -45,13 +45,13 @@ export interface IVideoDecoder {
    * Configure the decoder for a specific codec
    * @param codecData - Codec configuration from stream header
    */
-  configure(codecData: HeaderCodecData): Promise<void>;
+  configure(codecData: IMediaCodecData): Promise<void>;
   
   /**
    * Decode a binary packet from the stream
    * @param data - Parsed stream data containing header and payload
    */
-  decodeBinary(data: ParsedData): void;
+  decodeBinary(data: ParsedFrame): void;
   
   /**
    * Flush pending frames (synchronous reset)

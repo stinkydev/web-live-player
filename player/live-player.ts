@@ -9,10 +9,10 @@ import type { PreferredDecoder } from '../types';
 import { WebCodecsDecoder } from '../decoders/webcodecs-decoder';
 import { WasmDecoder, YUVFrame } from '../decoders/wasm-decoder';
 import { FrameScheduler, FrameTiming, LatencyStats } from '../scheduling/frame-scheduler';
-import { FLAG_IS_KEYFRAME, HeaderCodecData, ParsedData, PacketType } from '../protocol/sesame-binary-protocol';
 import { codecDataChanged, rescaleTime } from '../protocol/codec-utils';
 import { LiveAudioPlayer } from '../audio/live-audio-player';
 import { BasePlayer } from './base-player';
+import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputing/sesame-api-client';
 
 /**
  * Player configuration
@@ -91,14 +91,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   
   // Decoder
   private decoder: WebCodecsDecoder | WasmDecoder | null = null;
-  private currentCodecData: HeaderCodecData | undefined;
+  private currentCodecData: IMediaCodecData | undefined;
   private useWasmDecoder: boolean = false;
   private waitingForKeyframe: boolean = true;
   private lastWaitingForKeyframeLog: number = 0;
   private lastKeyframeRequest: number = 0;
   private statusLogCounter: number = 0;
   private isConfiguring: boolean = false;
-  private pendingDuringConfig: ParsedData[] = [];  // Queue frames during configuration
+  private pendingDuringConfig: ParsedFrame[] = [];  // Queue frames during configuration
   
   // Frame scheduling
   private frameScheduler: FrameScheduler<VideoFrame>;
@@ -121,7 +121,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private audioContext: AudioContext | null = null;
   private audioPlayer: LiveAudioPlayer | null = null;
   private ownsAudioContext: boolean = false;
-  private audioCodecData: HeaderCodecData | null = null;
+  private audioCodecData: IMediaCodecData | null = null;
   
   // Timing tracking: maps frame timestamp to arrival time
   private arrivalTimes: Map<number, number> = new Map();
@@ -529,11 +529,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
     
     // Track bandwidth - count payload bytes
-    const payloadBytes = data.payload_size || 0;
+    const payloadBytes = data.payload?.byteLength || 0;
     
     // Route audio to handler - audio may come on separate "audio" track (MoQ)
     // or on the same connection as video (WebSocket)
-    const isAudioPacket = data.header.type === PacketType.AUDIO_FRAME || event.streamType === 'audio';
+    const isAudioPacket = data.header.type === FrameType.FRAME_TYPE_AUDIO || event.streamType === 'audio';
     if (isAudioPacket) {
       // Track audio bandwidth
       this.audioBytesReceived += payloadBytes;
@@ -567,24 +567,24 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       return;
     }
     
-    if (!data.codec_data) {
+    if (!data.header.media?.codecData) {
       return;
     }
     
-    const isKeyframe = !!(data.header.flags & FLAG_IS_KEYFRAME);
+    const isKeyframe = !!(data.header.media?.keyframe);
     
     // Check for codec changes
-    if (codecDataChanged(this.currentCodecData, data.codec_data)) {
+    if (codecDataChanged(this.currentCodecData, data.header.media?.codecData)) {
       // Need keyframe to reconfigure
       if (!isKeyframe) {
         this.logger.debug('Waiting for keyframe (codec change)');
         return;
       }
       
-      this.currentCodecData = data.codec_data;
+      this.currentCodecData = data.header.media?.codecData;
       this.isConfiguring = true;
       this.pendingDuringConfig = [data]; // Queue the keyframe itself
-      await this.configureDecoder(data.codec_data);
+      await this.configureDecoder(data.header.media?.codecData);
       this.isConfiguring = false;
       this.waitingForKeyframe = true;
       
@@ -604,21 +604,21 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     
     // Queue frames that arrive during configuration
     if (this.isConfiguring) {
-      this.logger.debug(`Queueing frame pts=${data.header.pts} during configuration`);
+      this.logger.debug(`Queueing frame pts=${data.header.media?.pts} during configuration`);
       this.pendingDuringConfig.push(data);
       return;
     }
     
     // Ensure decoder is ready
     if (!this.decoder || this.decoder.state !== 'configured') {
-      this.logger.warn(`Dropping frame pts=${data.header.pts}: decoder not ready (state=${this.decoder?.state ?? 'null'})`);
+      this.logger.warn(`Dropping frame pts=${data.header.media?.pts}: decoder not ready (state=${this.decoder?.state ?? 'null'})`);
       return;
     }
     
     // Wait for keyframe after configuration or flush
     if (this.waitingForKeyframe) {
       if (!isKeyframe) {
-        this.logger.debug(`Dropping frame pts=${data.header.pts}: waiting for keyframe`);
+        this.logger.debug(`Dropping frame pts=${data.header.media?.pts}: waiting for keyframe`);
         const now = Date.now();
         // Log occasionally to avoid spam
         if (!this.lastWaitingForKeyframeLog || now - this.lastWaitingForKeyframeLog > 1000) {
@@ -644,11 +644,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       // Record arrival time for latency tracking
       // Use rescaled PTS (microseconds) as key to match what decoder outputs
       const arrivalTime = performance.now();
-      const sourceTimebase = data.codec_data?.timebase_den && data.codec_data?.timebase_num
-        ? { num: data.codec_data.timebase_num, den: data.codec_data.timebase_den }
+      const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
+        ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
         : { num: 1, den: 1000000 };
       const microsecondTimebase = { num: 1, den: 1000000 };
-      const timestampUs = rescaleTime(data.header!.pts, sourceTimebase, microsecondTimebase);
+      const timestampUs = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
       this.arrivalTimes.set(timestampUs, arrivalTime);
       this.keyframeStatus.set(timestampUs, isKeyframe);
       
@@ -688,15 +688,15 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   /**
    * Handle incoming audio frame data
    */
-  private async handleAudioData(data: ParsedData): Promise<void> {
+  private async handleAudioData(data: ParsedFrame): Promise<void> {
     if (!this.config.enableAudio) {
       return;
     }
     
     // Check for codec changes
     const currentCodecData = this.audioCodecData ?? undefined;
-    if (data.codec_data && codecDataChanged(currentCodecData, data.codec_data)) {
-      this.audioCodecData = data.codec_data;
+    if (data.header?.media?.codecData && codecDataChanged(currentCodecData, data.header.media.codecData)) {
+      this.audioCodecData = data.header.media.codecData;
       
       // Dispose old player if exists
       if (this.audioPlayer) {
@@ -716,24 +716,24 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       });
       
       // Initialize with codec data
-      await this.audioPlayer.init(data.codec_data);
+      await this.audioPlayer.init(data.header.media?.codecData);
       
       // Start playback
       this.audioPlayer.start();
-      this.logger.info(`Audio player started: ${data.codec_data.codec_type}, ${data.codec_data.sample_rate}Hz, ${data.codec_data.channels}ch`);
+      this.logger.info(`Audio player started: ${data.header.media?.codecData?.codecType}, ${data.header.media?.codecData?.sampleRate}Hz, ${data.header.media?.codecData?.channels}ch`);
     }
     
     // Decode the audio frame
     if (this.audioPlayer && data.payload && data.header) {
       // Pass PTS directly as bigint (microseconds)
-      this.audioPlayer.decode(data.payload, data.header.pts);
+      this.audioPlayer.decode(data.payload, data.header.media?.pts);
     }
   }
   
   /**
    * Configure the decoder for a specific codec
    */
-  private async configureDecoder(codecData: HeaderCodecData): Promise<void> {
+  private async configureDecoder(codecData: IMediaCodecData): Promise<void> {
     this.useWasmDecoder = this.config.preferredDecoder === 'wasm';
     
     // Create decoder if needed
@@ -774,8 +774,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       }
       
       // Update metadata
-      this.streamWidth = codecData.width;
-      this.streamHeight = codecData.height;
+      this.streamWidth = codecData.width || 0;
+      this.streamHeight = codecData.height || 0;
       
       // Reset FPS estimation for new stream (keep default of 30 until estimated)
       this.lastVideoTimestampUs = -1;
@@ -785,7 +785,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.emit('metadata', {
         width: codecData.width,
         height: codecData.height,
-        codec: this.getCodecName(codecData.codec_type),
+        codec: this.getCodecName(codecData.codecType || sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AVC),
       });
       
     } catch (error) {
@@ -795,11 +795,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
   }
   
-  private getCodecName(codecType: number): string {
+  private getCodecName(codecType: sesame.v1.common.CodecType): string {
     switch (codecType) {
-      case 3: return 'H.264';
-      case 4: return 'HEVC';
-      case 5: return 'AV1';
+      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AVC: return 'H.264';
+      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_HEVC: return 'HEVC';
+      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AV1: return 'AV1';
       default: return 'Unknown';
     }
   }

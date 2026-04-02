@@ -720,8 +720,8 @@ async function connectWebSocket() {
     
     // Load the live stream
     log(`Loading live stream: ${streamId}`);
-    const metadata = await wsSource.loadLive(streamId);
-    log(`Stream metadata: ${metadata.width}x${metadata.height}`);
+    await wsSource.loadLive(streamId);
+    log('Stream loaded, waiting for video data...');
     
     // Request keyframe to start receiving video data
     log('Requesting keyframe to start video...');

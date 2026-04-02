@@ -36,7 +36,7 @@ const capture = new MediaCapture({
   video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } },
   audio: { sampleRate: { ideal: 48000 }, channelCount: { ideal: 1 } },
   videoEncoder: {
-    codec: CodecType.VIDEO_VP8,
+    codec: CodecType.CODEC_TYPE_VIDEO_VP8,
     width: 640,
     height: 480,
     frameRate: 24,
@@ -45,7 +45,7 @@ const capture = new MediaCapture({
     latencyMode: 'realtime',
   },
   audioEncoder: {
-    codec: CodecType.AUDIO_OPUS,
+    codec: CodecType.CODEC_TYPE_AUDIO_OPUS,
     sampleRate: 48000,
     channels: 1,
     bitrate: 64_000,

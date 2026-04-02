@@ -2,7 +2,7 @@
  * WebCodecs-based video decoder
  */
 
-import { FLAG_IS_KEYFRAME, ParsedData, HeaderCodecData } from '../protocol/sesame-binary-protocol';
+import { ParsedFrame, IMediaCodecData } from '@stinkycomputing/sesame-api-client';
 import { rescaleTime, getCodecString } from '../protocol/codec-utils';
 import type { Logger } from '../types';
 import { consoleLogger } from '../types';
@@ -85,21 +85,21 @@ export class WebCodecsDecoder implements IVideoDecoder {
   }
   
   /**
-   * Configure the decoder for a specific codec (from HeaderCodecData)
+   * Configure the decoder for a specific codec (from IMediaCodecData)
    */
-  async configure(codecData: HeaderCodecData, preferHardware?: boolean): Promise<void>;
+  async configure(codecData: IMediaCodecData, preferHardware?: boolean): Promise<void>;
   /**
    * Configure the decoder with VideoDecoderConfig directly
    */
   async configure(config: VideoDecoderConfig): Promise<void>;
-  async configure(codecDataOrConfig: HeaderCodecData | VideoDecoderConfig, preferHardware: boolean = true): Promise<void> {
+  async configure(codecDataOrConfig: IMediaCodecData | VideoDecoderConfig, preferHardware: boolean = true): Promise<void> {
     // Check if it's a VideoDecoderConfig (has 'codec' string property)
     if ('codec' in codecDataOrConfig && typeof codecDataOrConfig.codec === 'string') {
       return this.configureWithConfig(codecDataOrConfig as VideoDecoderConfig);
     }
     
-    // It's HeaderCodecData
-    return this.configureWithCodecData(codecDataOrConfig as HeaderCodecData, preferHardware);
+    // It's IMediaCodecData
+    return this.configureWithCodecData(codecDataOrConfig as IMediaCodecData, preferHardware);
   }
   
   /**
@@ -131,28 +131,31 @@ export class WebCodecsDecoder implements IVideoDecoder {
   }
   
   /**
-   * Configure with HeaderCodecData (from binary protocol)
+   * Configure with IMediaCodecData (from binary protocol)
    */
-  private async configureWithCodecData(codecData: HeaderCodecData, preferHardware: boolean = true): Promise<void> {
+  private async configureWithCodecData(codecData: IMediaCodecData, preferHardware: boolean = true): Promise<void> {
     const codecString = getCodecString(codecData);
     
     if (!codecString) {
-      throw new Error(`Unsupported codec type: ${codecData.codec_type}`);
+      throw new Error(`Unsupported codec type: ${codecData.codecType}`);
     }
+    
+    const width = codecData.width ?? 0;
+    const height = codecData.height ?? 0;
     
     // Try multiple configurations for fallback
     const configs: VideoDecoderConfig[] = [
       {
         codec: codecString,
-        codedWidth: codecData.width,
-        codedHeight: codecData.height,
+        codedWidth: width,
+        codedHeight: height,
         hardwareAcceleration: preferHardware ? 'prefer-hardware' : 'prefer-software',
         latencyMode: 'realtime',
       },
       {
         codec: codecString,
-        codedWidth: codecData.width,
-        codedHeight: codecData.height,
+        codedWidth: width,
+        codedHeight: height,
         hardwareAcceleration: preferHardware ? 'prefer-software' : 'prefer-hardware',
         latencyMode: 'realtime',
       },
@@ -164,7 +167,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       if (support.supported) {
         this.config = config;
         this.decoder?.configure(config);
-        this.logger.info(`Decoder configured: ${codecString} ${codecData.width}x${codecData.height} (${config.hardwareAcceleration})`);
+        this.logger.info(`Decoder configured: ${codecString} ${width}x${height} (${config.hardwareAcceleration})`);
         return;
       }
     }
@@ -175,7 +178,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
   /**
    * Decode a binary packet
    */
-  decodeBinary(data: ParsedData): void {
+  decodeBinary(data: ParsedFrame): void {
     if (this.flushing) {
       this.logger.warn('Received packet while flushing');
       return;
@@ -194,15 +197,15 @@ export class WebCodecsDecoder implements IVideoDecoder {
     }
     
     // Convert timestamp to microseconds
-    const sourceTimebase = data.codec_data?.timebase_den && data.codec_data?.timebase_num
-      ? { num: data.codec_data.timebase_num, den: data.codec_data.timebase_den }
+    const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
+      ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
       : { num: 1, den: 1000000 };
     const microsecondTimebase = { num: 1, den: 1000000 };
-    const pts = rescaleTime(data.header.pts, sourceTimebase, microsecondTimebase);
+    const pts = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
     
     const chunk = new EncodedVideoChunk({
       timestamp: pts,
-      type: (data.header.flags & FLAG_IS_KEYFRAME) ? 'key' : 'delta',
+      type: data.header.media?.keyframe ? 'key' : 'delta',
       data: data.payload ?? new Uint8Array(0),
     });
     

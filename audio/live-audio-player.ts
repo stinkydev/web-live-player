@@ -5,7 +5,18 @@
  * Supports Opus and AAC codecs with A/V sync via configurable buffer delay.
  */
 
-import { CodecType, HeaderCodecData } from '../protocol/sesame-binary-protocol';
+import { CodecType, IMediaCodecData } from "@stinkycomputing/sesame-api-client";
+
+/**
+ * Check if value is a Long object (duck-typing to avoid importing 'long' module)
+ */
+function isLong(value: unknown): value is { toNumber(): number } {
+  return value !== null && 
+         typeof value === 'object' && 
+         'low' in value && 
+         'high' in value &&
+         typeof (value as any).toNumber === 'function';
+}
 
 // Inline worklet code for live audio with sync support
 const LIVE_WORKLET_CODE = `
@@ -187,7 +198,7 @@ export class LiveAudioPlayer {
   /**
    * Initialize with codec info from stream header
    */
-  async init(codecData?: HeaderCodecData): Promise<void> {
+  async init(codecData?: IMediaCodecData): Promise<void> {
     if (this.ctx.audioWorklet === undefined) {
       throw new Error('AudioWorklet not supported - need localhost or HTTPS');
     }
@@ -247,27 +258,27 @@ export class LiveAudioPlayer {
   /**
    * Build decoder config based on codec type
    */
-  private buildDecoderConfig(codecData?: HeaderCodecData): AudioDecoderConfig {
-    const codecType = codecData?.codec_type ?? CodecType.AUDIO_OPUS;
-    const sampleRate = codecData?.sample_rate || 48000;
+  private buildDecoderConfig(codecData?: IMediaCodecData): AudioDecoderConfig {
+    const codecType = codecData?.codecType ?? CodecType.CODEC_TYPE_AUDIO_OPUS;
+    const sampleRate = codecData?.sampleRate || 48000;
     const channels = codecData?.channels || 2;
     
     switch (codecType) {
-      case CodecType.AUDIO_OPUS:
+      case CodecType.CODEC_TYPE_AUDIO_OPUS:
         return {
           codec: 'opus',
           sampleRate: 48000, // Opus always uses 48kHz internally
           numberOfChannels: channels,
         };
         
-      case CodecType.AUDIO_AAC:
+      case CodecType.CODEC_TYPE_AUDIO_AAC:
         return {
           codec: 'mp4a.40.2', // AAC-LC
           sampleRate: sampleRate,
           numberOfChannels: channels,
         };
         
-      case CodecType.AUDIO_PCM:
+      case CodecType.CODEC_TYPE_AUDIO_PCM:
         // PCM doesn't need decoding, handle separately
         throw new Error('PCM audio not yet supported');
         
@@ -401,7 +412,7 @@ export class LiveAudioPlayer {
   /**
    * Queue encoded audio data for decoding
    */
-  decode(data: Uint8Array, pts?: bigint): void {
+  decode(data: Uint8Array, pts?: number | bigint | null | { toNumber(): number }): void {
     if (!this.initialized || !this.decoder || this.decoder.state !== 'configured') {
       return;
     }
@@ -412,9 +423,16 @@ export class LiveAudioPlayer {
     
     try {
       // Use PTS if provided, otherwise use relative time
-      const timestamp = pts !== undefined 
-        ? Number(pts)
-        : (performance.now() * 1000) - this.startTime;
+      let timestamp: number;
+      if (pts !== undefined && pts !== null) {
+        if (isLong(pts)) {
+          timestamp = pts.toNumber();
+        } else {
+          timestamp = Number(pts);
+        }
+      } else {
+        timestamp = (performance.now() * 1000) - this.startTime;
+      }
       
       const chunk = new EncodedAudioChunk({
         type: 'key',
