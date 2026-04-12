@@ -1,6 +1,6 @@
 {
   "name": "@stinkycomputing/web-live-player",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "A Player library for Sesame video streams using WebCodecs and MoQ",
   "type": "module",
   "main": "./dist/web-live-player.cjs",
@@ -43,7 +43,7 @@
     "mp4box": "^2.3.0",
     "stinky-moq-js": "0.1.22",
     "tinyh264": "^0.0.7",
-    "@stinkycomputing/sesame-api-client": "1.4.1-beta.14"
+    "@stinkycomputing/sesame-api-client": "1.5.0-alpha.2"
   },
   "keywords": [
     "video",
