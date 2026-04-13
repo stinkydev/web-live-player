@@ -7,7 +7,7 @@
  * - Custom protocols
  */
 
-import { ParsedFrame } from '@stinkycomputing/sesame-api-client';
+import { ParsedFrame, WireProtocol, FrameType } from '@stinkycomputing/sesame-api-client';
 
 /**
  * Event data emitted when stream data is received
@@ -108,5 +108,37 @@ export abstract class BaseStreamSource implements IStreamSource {
   
   dispose(): void {
     this.handlers.clear();
+  }
+  
+  /**
+   * Parse raw binary data using the wire protocol and emit a typed stream event.
+   * Shared by all transport sources (WebSocket, MoQ, etc.) to ensure consistent handling.
+   */
+  protected parseAndEmitStreamData(trackName: string, data: Uint8Array): void {
+    try {
+      const parsedData = WireProtocol.parse(data);
+
+      if (!parsedData.valid || !parsedData.header) {
+        console.warn(`Invalid packet format for track ${trackName}`);
+        return;
+      }
+
+      let streamType: 'video' | 'audio' | 'data' = 'data';
+      if (parsedData.header.type === FrameType.FRAME_TYPE_VIDEO) {
+        streamType = 'video';
+      } else if (parsedData.header.type === FrameType.FRAME_TYPE_AUDIO) {
+        streamType = 'audio';
+      }
+
+      const event: StreamDataEvent = {
+        trackName,
+        streamType,
+        data: parsedData,
+      };
+
+      this.emit('data', event);
+    } catch (error) {
+      console.error(`Failed to parse packet for track ${trackName}:`, error);
+    }
   }
 }

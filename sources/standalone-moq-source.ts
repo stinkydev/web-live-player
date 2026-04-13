@@ -5,8 +5,8 @@
  * Uses stinky-moq-js directly to connect to MoQ relays.
  */
 
-import { BaseStreamSource, StreamDataEvent } from './stream-source';
-import { WireProtocol, ParsedFrame } from '@stinkycomputing/sesame-api-client';
+import { BaseStreamSource } from './stream-source';
+
 import type { MoQSessionConfig, SubscriptionConfig, MoqSessionSubscriber } from 'stinky-moq-js';
 
 /**
@@ -134,42 +134,7 @@ export class MoQSource extends BaseStreamSource {
   }
   
   private handleIncomingData(trackName: string, data: Uint8Array): void {
-    const streamType = this.trackTypeMap.get(trackName) || 'data';
-    
-    if (streamType === 'video' || streamType === 'audio') {
-      // Parse binary protocol for video/audio
-      try {
-        const parsedData = WireProtocol.parse(data);
-        
-        if (!parsedData.valid) {
-          console.warn(`Invalid ${streamType} packet format for track ${trackName}`);
-          return;
-        }
-        
-        const event: StreamDataEvent = {
-          trackName,
-          streamType,
-          data: parsedData,
-        };
-        
-        this.emit('data', event);
-      } catch (error) {
-        console.error(`Failed to parse ${streamType} packet:`, error);
-      }
-    } else {
-      // For data streams, create a minimal parsed data structure
-      const event: StreamDataEvent = {
-        trackName,
-        streamType: 'data',
-        data: {
-          valid: true,
-          header: null,
-          payload: data,
-        } as ParsedFrame,
-      };
-      
-      this.emit('data', event);
-    }
+    this.parseAndEmitStreamData(trackName, data);
   }
   
   dispose(): void {

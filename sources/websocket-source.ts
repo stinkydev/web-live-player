@@ -5,8 +5,7 @@
  * Uses the Sesame Wire Protocol for parsing video/audio frames.
  */
 
-import { BaseStreamSource, StreamDataEvent } from './stream-source';
-import { WireProtocol, FrameType } from '@stinkycomputing/sesame-api-client';
+import { BaseStreamSource } from './stream-source';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MIN_KEYFRAME_REQUEST_INTERVAL_MS = 1000;
@@ -287,30 +286,7 @@ export class WebSocketSource extends BaseStreamSource {
   }
 
   private handleBinaryData(data: ArrayBuffer): void {
-    const dataArray = new Uint8Array(data);
-    const parsedData = WireProtocol.parse(dataArray);
-
-    if (!parsedData.valid || !parsedData.header) {
-      console.warn('Invalid binary packet received');
-      return;
-    }
-
-    // Determine stream type from packet type
-    let streamType: 'video' | 'audio' | 'data' = 'data';
-    if (parsedData.header.type === FrameType.FRAME_TYPE_VIDEO) {
-      streamType = 'video';
-    } else if (parsedData.header.type === FrameType.FRAME_TYPE_AUDIO) {
-      streamType = 'audio';
-    }
-
-    // Emit data event
-    const event: StreamDataEvent = {
-      trackName: this.currentTrackName,
-      streamType,
-      data: parsedData,
-    };
-
-    this.emit('data', event);
+    this.parseAndEmitStreamData(this.currentTrackName, new Uint8Array(data));
   }
 
   private handleDisconnect(): void {
