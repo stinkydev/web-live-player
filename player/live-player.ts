@@ -22,6 +22,8 @@ export interface PlayerConfig {
   /** Buffer delay in milliseconds (default: 100ms) */
   bufferDelayMs?: number;
   enableAudio?: boolean;
+  /** External AudioContext to use for audio playback. If provided, the player will not create or close it. */
+  audioContext?: AudioContext;
   /** Video track name for MoQ streams (default: 'video'). Set to null to accept video from any track. */
   videoTrackName?: string | null;
   /** Audio track name for MoQ streams (default: 'audio'). Set to null to accept audio from any track. */
@@ -154,8 +156,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     
     // Initialize audio context if enabled
     if (this.config.enableAudio) {
-      this.audioContext = new AudioContext();
-      this.ownsAudioContext = true;
+      if (config.audioContext) {
+        this.audioContext = config.audioContext;
+        this.ownsAudioContext = false;
+      } else {
+        this.audioContext = new AudioContext();
+        this.ownsAudioContext = true;
+      }
     }
     
     // Initialize frame scheduler
@@ -706,8 +713,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       
       // Create audio context if needed
       if (!this.audioContext) {
-        this.audioContext = new AudioContext();
-        this.ownsAudioContext = true;
+        if (this.config.audioContext) {
+          this.audioContext = this.config.audioContext;
+          this.ownsAudioContext = false;
+        } else {
+          this.audioContext = new AudioContext();
+          this.ownsAudioContext = true;
+        }
       }
       
       // Create audio player with buffer delay config
