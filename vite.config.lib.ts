@@ -21,10 +21,18 @@ export default defineConfig({
     outDir: resolve(__dirname, 'dist'),
     emptyOutDir: true,
     rollupOptions: {
-      external: ['stinky-moq-js'],
+      external: [
+        'stinky-moq-js',
+        'mp4box',
+        'tinyh264',
+        '@stinkycomputing/sesame-api-client',
+      ],
       output: {
         globals: {
           'stinky-moq-js': 'StinkyMoqJS',
+          'mp4box': 'MP4Box',
+          'tinyh264': 'TinyH264',
+          '@stinkycomputing/sesame-api-client': 'SesameApiClient',
         },
       },
     },

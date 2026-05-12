@@ -76,6 +76,13 @@ export class WebSocketSource extends BaseStreamSource {
   private reconnectTimeout: number | null = null;
   private disposed: boolean = false;
 
+  private clearWebSocketHandlers(socket: WebSocket): void {
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
+  }
+
   constructor(config: WebSocketSourceConfig = {}) {
     super();
     
@@ -119,25 +126,43 @@ export class WebSocketSource extends BaseStreamSource {
       let connectionResolved = false;
 
       try {
-        this.webSocket = new WebSocket(url);
-        this.webSocket.binaryType = 'arraybuffer';
+        const socket = new WebSocket(url);
+        this.webSocket = socket;
+        socket.binaryType = 'arraybuffer';
 
         // Start timeout checker
         this.startTimeoutChecker();
 
-        this.webSocket.onopen = () => {
+        const connectionTimeout = setTimeout(() => {
+          if (!connectionResolved) {
+            connectionResolved = true;
+            socket.close();
+            reject(new Error('Connection timeout'));
+          }
+        }, this.config.timeout);
+
+        socket.onopen = () => {
           if (connectionResolved) return;
           connectionResolved = true;
+          clearTimeout(connectionTimeout);
           this._connected = true;
           this.emit('connected');
           resolve();
         };
 
-        this.webSocket.onmessage = (event) => {
+        socket.onmessage = (event) => {
           this.handleMessage(event);
         };
 
-        this.webSocket.onclose = () => {
+        socket.onclose = () => {
+          clearTimeout(connectionTimeout);
+          this.stopTimeoutChecker();
+
+          if (this.webSocket === socket) {
+            this.clearWebSocketHandlers(socket);
+            this.webSocket = null;
+          }
+
           const wasConnected = this._connected;
           this._connected = false;
           
@@ -152,22 +177,14 @@ export class WebSocketSource extends BaseStreamSource {
           }
         };
 
-        this.webSocket.onerror = (_error) => {
+        socket.onerror = (_error) => {
+          clearTimeout(connectionTimeout);
           if (!connectionResolved) {
             connectionResolved = true;
             reject(new Error('WebSocket connection error'));
           }
           this.emit('error', new Error('WebSocket error'));
         };
-
-        // Connection timeout
-        setTimeout(() => {
-          if (!connectionResolved) {
-            connectionResolved = true;
-            this.webSocket?.close();
-            reject(new Error('Connection timeout'));
-          }
-        }, this.config.timeout);
 
       } catch (err) {
         reject(err);
@@ -182,6 +199,7 @@ export class WebSocketSource extends BaseStreamSource {
     this.stopReconnect();
     
     if (this.webSocket) {
+      this.clearWebSocketHandlers(this.webSocket);
       this.webSocket.close();
       this.webSocket = null;
     }
