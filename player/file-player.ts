@@ -76,6 +76,7 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   private audioPlayer: FileAudioPlayer | null = null;
   private ownsAudioContext: boolean = false;
   private audioInitialized: boolean = false;
+  private volume: number = 1;
   
   // File info
   private fileInfo: MP4FileInfo | null = null;
@@ -196,20 +197,20 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
 
   /**
    * Set audio volume (0-1)
+   *
+   * The value is remembered and re-applied whenever the audio decoder is
+   * (re)initialized, so calls made before the decoder is ready are not lost.
    */
   setVolume(volume: number): void {
-    if (this.audioPlayer) {
-      this.audioPlayer.setVolume(volume);
-    }
+    this.volume = Math.max(0, Math.min(1, volume));
+    this.audioPlayer?.setVolume(this.volume);
   }
 
   /**
    * Get current audio volume (0-1)
    */
   getVolume(): number {
-    // Note: We don't have a way to read current volume from FileAudioPlayer,
-    // so we track it here if needed. For now, return 1 as default.
-    return 1;
+    return this.volume;
   }
   
   /**
@@ -370,7 +371,10 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
         this.fileInfo.audioChannels ?? 2,
         audioDescription ?? undefined
       );
-      
+
+      // Re-apply the caller's desired volume to the fresh audio player
+      this.audioPlayer.setVolume(this.volume);
+
       this.audioInitialized = true;
       this.logger.info(`Audio decoder configured: ${this.fileInfo.audioCodec}`);
       

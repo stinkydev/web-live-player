@@ -124,6 +124,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private audioPlayer: LiveAudioPlayer | null = null;
   private ownsAudioContext: boolean = false;
   private audioCodecData: IMediaCodecData | null = null;
+  private volume: number = 1;
   
   // Timing tracking: maps frame timestamp to arrival time
   private arrivalTimes: Map<number, number> = new Map();
@@ -208,18 +209,21 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
 
   /**
    * Set audio volume (0-1)
+   *
+   * The value is remembered and re-applied whenever a new audio player is
+   * created, so calls made before audio arrives (or across codec changes)
+   * are not lost.
    */
   setVolume(volume: number): void {
-    if (this.audioPlayer) {
-      this.audioPlayer.setVolume(volume);
-    }
+    this.volume = Math.max(0, Math.min(1, volume));
+    this.audioPlayer?.setVolume(this.volume);
   }
 
   /**
    * Get current audio volume (0-1)
    */
   getVolume(): number {
-    return 1; // Default, we don't track volume state
+    return this.volume;
   }
   
   /**
@@ -729,7 +733,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       
       // Initialize with codec data
       await this.audioPlayer.init(data.header.media?.codecData);
-      
+
+      // Re-apply the caller's desired volume to the fresh audio player
+      this.audioPlayer.setVolume(this.volume);
+
       // Start playback
       this.audioPlayer.start();
       this.logger.info(`Audio player started: ${data.header.media?.codecData?.codecType}, ${data.header.media?.codecData?.sampleRate}Hz, ${data.header.media?.codecData?.channels}ch`);
