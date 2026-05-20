@@ -408,6 +408,14 @@
               <div class="stat-value" id="statAudioBandwidth">-</div>
               <div class="stat-label">Audio Bandwidth</div>
             </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statVideoBytes">0 B</div>
+              <div class="stat-label">Video Bytes Received</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statDataBytes">0 B</div>
+              <div class="stat-label">Data Bytes Received</div>
+            </div>
           </div>
         </div>
         
@@ -460,6 +468,15 @@
             <div class="form-group">
               <label>Audio Track</label>
               <input type="text" id="moqAudioTrack" value="audio" placeholder="audio">
+            </div>
+            <div class="form-group">
+              <label>
+                <input type="checkbox" id="moqEnableDataTrack" checked> Subscribe Data Track
+              </label>
+            </div>
+            <div class="form-group">
+              <label>Data Track (optional)</label>
+              <input type="text" id="moqDataTrack" value="data" placeholder="data">
             </div>
             <button class="btn btn-primary" id="btnConnectMoq" style="width: 100%;">Connect to MoQ</button>
           </div>

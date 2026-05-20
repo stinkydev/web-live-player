@@ -31,6 +31,8 @@ const statTotal = document.getElementById('statTotal')!;
 const statRenderFps = document.getElementById('statRenderFps')!;
 const statVideoBandwidth = document.getElementById('statVideoBandwidth')!;
 const statAudioBandwidth = document.getElementById('statAudioBandwidth')!;
+const statVideoBytes = document.getElementById('statVideoBytes')!;
+const statDataBytes = document.getElementById('statDataBytes')!;
 
 // Timing graph elements
 const timingCanvas = document.getElementById('timingCanvas') as HTMLCanvasElement;
@@ -58,6 +60,8 @@ const moqRelayUrlInput = document.getElementById('moqRelayUrl') as HTMLInputElem
 const moqNamespaceInput = document.getElementById('moqNamespace') as HTMLInputElement;
 const moqVideoTrackInput = document.getElementById('moqVideoTrack') as HTMLInputElement;
 const moqAudioTrackInput = document.getElementById('moqAudioTrack') as HTMLInputElement;
+const moqEnableDataTrackInput = document.getElementById('moqEnableDataTrack') as HTMLInputElement;
+const moqDataTrackInput = document.getElementById('moqDataTrack') as HTMLInputElement;
 
 // WebSocket inputs
 const wsUrlInput = document.getElementById('wsUrl') as HTMLInputElement;
@@ -110,6 +114,9 @@ let lastFpsUpdate = 0;
 let currentFps = 0;
 let mockStreamInterval: number | null = null;
 let lastStatsUpdate = 0;
+let videoBytesReceived = 0;
+let dataBytesReceived = 0;
+let activeDataTrackName: string | null = null;
 
 // Logging utility
 function log(message: string, level: 'info' | 'warn' | 'error' | 'debug' = 'info') {
@@ -156,6 +163,9 @@ function updateStats() {
     statVideoBandwidth.textContent = '-';
     statAudioBandwidth.textContent = '-';
   }
+
+  updateVideoBytesStat();
+  updateDataBytesStat();
   
   // Update timing graph
   updateTimingGraph();
@@ -174,6 +184,32 @@ function formatBandwidth(bytesPerSecond: number): string {
   } else {
     return `${bitsPerSecond.toFixed(0)} bps`;
   }
+}
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+function updateDataBytesStat() {
+  statDataBytes.textContent = formatByteCount(dataBytesReceived);
+}
+
+function updateVideoBytesStat() {
+  statVideoBytes.textContent = formatByteCount(videoBytesReceived);
 }
 
 // Timing graph colors
@@ -493,6 +529,11 @@ function disconnect() {
   }
   
   isFileMode = false;
+  videoBytesReceived = 0;
+  dataBytesReceived = 0;
+  activeDataTrackName = null;
+  updateVideoBytesStat();
+  updateDataBytesStat();
   
   // Clear canvas
   ctx.fillStyle = '#000';
@@ -532,6 +573,8 @@ function updateFileStats() {
   statDecoder.textContent = stats.state;
   statTotal.textContent = '-';
   statLatency.textContent = '-';
+  statVideoBytes.textContent = '-';
+  statDataBytes.textContent = '-';
   
   // Update seek bar and position display
   if (duration > 0) {
@@ -608,6 +651,8 @@ async function connectMoQ() {
   const namespace = moqNamespaceInput.value;
   const videoTrack = moqVideoTrackInput.value;
   const audioTrack = moqAudioTrackInput.value;
+  const enableDataTrack = moqEnableDataTrackInput.checked;
+  const dataTrack = moqDataTrackInput.value.trim() || 'data';
   
   if (!relayUrl || !namespace || !videoTrack || !audioTrack) {
     log('Please fill in all MoQ connection fields', 'warn');
@@ -620,15 +665,27 @@ async function connectMoQ() {
   try {
     // Create player
     player = createPlayerInstance();
+
+    videoBytesReceived = 0;
+    dataBytesReceived = 0;
+    activeDataTrackName = enableDataTrack ? dataTrack : null;
+    updateVideoBytesStat();
+    updateDataBytesStat();
     
     // Create MoQ source with both video and audio tracks
+    const subscriptions: Array<{ trackName: string; streamType: 'video' | 'audio' | 'data'; priority: number }> = [
+      { trackName: videoTrack, streamType: 'video', priority: 0 },
+      { trackName: audioTrack, streamType: 'audio', priority: 0 },
+    ];
+
+    if (enableDataTrack) {
+      subscriptions.push({ trackName: dataTrack, streamType: 'data', priority: 0 });
+    }
+
     const moqSource = createMoQSource({
       relayUrl,
       namespace,
-      subscriptions: [
-        { trackName: videoTrack, streamType: 'video', priority: 0 },
-        { trackName: audioTrack, streamType: 'audio', priority: 0 },
-      ],
+      subscriptions,
     });
     
     // Handle source events
@@ -645,6 +702,17 @@ async function connectMoQ() {
     moqSource.on('error', (error) => {
       log(`MoQ error: ${error.message}`, 'error');
     });
+
+    moqSource.on('data', (event) => {
+      if (event.streamType === 'video' && event.trackName === videoTrack) {
+        videoBytesReceived += event.data.payload?.byteLength ?? 0;
+      }
+
+      if (!activeDataTrackName || event.streamType !== 'data' || event.trackName !== activeDataTrackName) {
+        return;
+      }
+      dataBytesReceived += event.data.payload?.byteLength ?? 0;
+    });
     
     // Connect
     await moqSource.connect();
@@ -654,6 +722,10 @@ async function connectMoQ() {
     player.setStreamSource(moqSource);
     player.setTrackFilter(videoTrack);
     player.play();
+
+    if (enableDataTrack) {
+      log(`Subscribed to data track: ${dataTrack}`);
+    }
     
     // Update stats immediately
     updateStats();
@@ -961,6 +1033,10 @@ debugLoggingInput.addEventListener('change', () => {
   }
 });
 
+moqEnableDataTrackInput.addEventListener('change', () => {
+  moqDataTrackInput.disabled = !moqEnableDataTrackInput.checked;
+});
+
 // File loop toggle
 fileLoopInput.addEventListener('change', () => {
   if (filePlayer) {
@@ -989,6 +1065,10 @@ document.addEventListener('fullscreenchange', () => {
 // Initialize
 log('Sesame Video Player Demo initialized');
 log('Select a connection method and click Connect');
+
+moqDataTrackInput.disabled = !moqEnableDataTrackInput.checked;
+updateVideoBytesStat();
+updateDataBytesStat();
 
 // Set initial canvas size
 videoCanvas.width = 1280;
