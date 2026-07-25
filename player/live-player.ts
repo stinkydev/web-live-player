@@ -67,6 +67,13 @@ export interface PlayerStats {
  * Player event types
  */
 type PlayerEventMap = {
+  /**
+   * A frame finished decoding.
+   *
+   * The player owns the frame and may close it once the handler returns - do not
+   * close it, and do not retain it. Call `frame.clone()` if you need to keep it,
+   * and close the clone yourself.
+   */
   'frame': (frame: VideoFrame) => void;
   'statechange': (state: PlayerState) => void;
   'error': (error: Error) => void;
@@ -88,7 +95,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   
   // Stream source
   private streamSource: IStreamSource | null = null;
+  /** True when the player created the source and must dispose it */
+  private ownsStreamSource: boolean = false;
   private trackFilter: string | null = null;
+  /** Track names already reported as filtered out, so the warning is logged once each */
+  private warnedVideoTracks: Set<string> = new Set();
   private boundDataHandler: ((event: StreamDataEvent) => void) | null = null;
   
   // Decoder
@@ -131,6 +142,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private audioPlayer: LiveAudioPlayer | null = null;
   private ownsAudioContext: boolean = false;
   private audioCodecData: IMediaCodecData | null = null;
+  /** Timebase of the current audio codec data, cached like the video one */
+  private audioTimebase: Timebase = MICROSECOND_TIMEBASE;
   private volume: number = 1;
   private audioInitializing: boolean = false;
   private pendingAudioDuringInit: ParsedFrame[] = [];
@@ -242,13 +255,21 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   
   /**
    * Set the stream source (dependency injection)
+   *
+   * The caller keeps ownership: `dispose()` unsubscribes from the source but does
+   * not dispose it. A source the player created itself (see
+   * {@link connectToMoQRelay}) is disposed here before being replaced.
    */
   setStreamSource(source: IStreamSource): void {
     // Disconnect from previous source
     if (this.streamSource && this.boundDataHandler) {
       this.streamSource.off('data', this.boundDataHandler);
     }
-    
+    if (this.ownsStreamSource) {
+      this.streamSource?.dispose?.();
+    }
+    this.ownsStreamSource = false;
+
     this.streamSource = source;
     this.boundDataHandler = this.handleStreamData.bind(this);
     this.streamSource.on('data', this.boundDataHandler);
@@ -285,15 +306,18 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   /**
    * Connect to a MoQ relay directly with video and optional audio tracks
    * 
+   * The player owns the source it creates here and disposes it on `dispose()`.
+   * The source is returned so it can be inspected or torn down early.
+   *
    * @param relayUrl - URL of the MoQ relay (e.g., 'https://relay.example.com/moq')
    * @param namespace - MoQ namespace/broadcast name
    * @param options - Optional configuration for track names
    */
   async connectToMoQRelay(
-    relayUrl: string, 
-    namespace: string, 
+    relayUrl: string,
+    namespace: string,
     options?: { videoTrack?: string; audioTrack?: string | false }
-  ): Promise<void> {
+  ): Promise<IStreamSource> {
     const { createMoQSource } = await import('../sources/moq-source');
     
     const videoTrack = options?.videoTrack ?? this.config.videoTrackName ?? 'video';
@@ -318,7 +342,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     });
     
     this.setStreamSource(source);
+    this.ownsStreamSource = true;
     await source.connect();
+
+    return source;
   }
   
   /**
@@ -345,9 +372,12 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   
   /**
    * Get a video frame for rendering
-   * 
+   *
    * Call this in your render loop with the current timestamp.
-   * The returned VideoFrame should be closed after use if you're done with it.
+   *
+   * The player owns the returned frame and closes it when the next frame is due,
+   * so it is valid until the following call. Do not close it - draw from it, or
+   * `clone()` it if you need to hold on to it.
    */
   getVideoFrame(timestampMs: number): VideoFrame | null {
     if (this._state !== 'playing') {
@@ -587,6 +617,15 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     // Filter by track name for video if set (trackFilter overrides config)
     const videoTrack = this.trackFilter ?? this.config.videoTrackName;
     if (videoTrack !== null && videoTrack !== undefined && event.trackName !== videoTrack) {
+      // A transport that names tracks after the stream (e.g. WebSocketSource) will
+      // never match the default 'video', which otherwise looks like a dead stream
+      if (event.streamType === 'video' && !this.warnedVideoTracks.has(event.trackName)) {
+        this.warnedVideoTracks.add(event.trackName);
+        this.logger.warn(
+          `Ignoring video on track "${event.trackName}" - expecting "${videoTrack}". ` +
+          `Call setTrackFilter("${event.trackName}"), or set videoTrackName to null to accept any track.`
+        );
+      }
       return;
     }
     
@@ -794,8 +833,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   /** Hand an audio frame to the audio player */
   private decodeAudioFrame(data: ParsedFrame): void {
     if (this.audioPlayer && data.payload && data.header) {
-      // Pass PTS directly as bigint (microseconds)
-      this.audioPlayer.decode(data.payload, data.header.media?.pts);
+      // Rescale to microseconds, the unit the audio player expects
+      const timestampUs = rescaleTime(
+        data.header.media?.pts ?? 0,
+        this.audioTimebase,
+        MICROSECOND_TIMEBASE
+      );
+      this.audioPlayer.decode(data.payload, timestampUs);
     }
   }
 
@@ -806,6 +850,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private async initAudioPlayer(codecData: IMediaCodecData, firstFrame: ParsedFrame): Promise<void> {
     // Set before awaiting so frames arriving during init don't trigger a second init
     this.audioCodecData = codecData;
+    this.audioTimebase = timebaseFromCodecData(codecData);
     this.audioInitializing = true;
     this.pendingAudioDuringInit = [firstFrame];
 
@@ -849,6 +894,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         this.audioPlayer = null;
       }
       this.audioCodecData = null;
+      this.audioTimebase = MICROSECOND_TIMEBASE;
       return;
     } finally {
       this.audioInitializing = false;
@@ -1079,10 +1125,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * Dispose the player and release resources
    */
   dispose(): void {
-    // Disconnect from source
+    // Disconnect from source, and dispose it if the player created it
     if (this.streamSource && this.boundDataHandler) {
       this.streamSource.off('data', this.boundDataHandler);
     }
+    if (this.ownsStreamSource) {
+      this.streamSource?.dispose?.();
+    }
+    this.ownsStreamSource = false;
     this.streamSource = null;
     this.boundDataHandler = null;
     
@@ -1106,6 +1156,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
     this.audioContext = null;
     this.audioCodecData = null;
+    this.audioTimebase = MICROSECOND_TIMEBASE;
     
     // Clear frame buffer
     this.frameScheduler.clear();
@@ -1128,10 +1179,12 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.totalDrops = 0;
     this.consecutiveDrops = 0;
     
-    // Clear event handlers (from BasePlayer)
-    this.clearEventHandlers();
-    
+    this.warnedVideoTracks.clear();
+
+    // Deliver the final statechange before dropping the handlers
     this.setState('idle');
+    this.clearEventHandlers();
+
     this.logger.info('Player disposed');
   }
 }

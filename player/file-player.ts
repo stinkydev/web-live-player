@@ -29,6 +29,12 @@ export interface FilePlayerConfig {
   debugLogging?: boolean;
   /** Play mode: 'once' plays to end, 'loop' seamlessly loops (default: 'once') */
   playMode?: FilePlayMode;
+  /**
+   * Maximum number of decoded frames to hold ahead of the playback position
+   * (default: 60). Each buffered frame holds full decoded video memory, so this
+   * bounds how much the decoder may run ahead.
+   */
+  maxBufferedFrames?: number;
   /** @deprecated Use playMode instead */
   loop?: boolean;
 }
@@ -50,6 +56,13 @@ export interface FilePlayerStats {
   frameRate: number;
   codec: string;
   state: FilePlayerState;
+}
+
+/**
+ * Coerce a thrown value into an Error, so 'error' handlers always receive one
+ */
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 /**
@@ -84,6 +97,7 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   // Frame buffer - sorted by timestamp
   private frameBuffer: TimedFrame[] = [];
   private minBufferSize: number = 3; // Minimum frames before starting playback (100ms at 30fps)
+  private maxFrameBuffer: number;    // Upper bound on decoded frames held ahead of playback
   
   // Sample queues - video and audio samples waiting to be decoded
   private sampleQueue: DecodableSample[] = [];
@@ -115,8 +129,11 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
       enableAudio: config.enableAudio ?? true, // Audio on by default
       debugLogging: config.debugLogging ?? false,
       playMode,
+      maxBufferedFrames: config.maxBufferedFrames ?? 60,
     };
-    
+
+    this.maxFrameBuffer = Math.max(this.minBufferSize, this.config.maxBufferedFrames!);
+
     // Handle audio context
     if (config.audioContext) {
       this.audioContext = config.audioContext;
@@ -256,7 +273,7 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
       return this.fileInfo;
     } catch (error) {
       this.setState('error');
-      this.emit('error', error);
+      this.emit('error', toError(error));
       throw error;
     }
   }
@@ -305,7 +322,7 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
       return this.fileInfo;
     } catch (error) {
       this.setState('error');
-      this.emit('error', error);
+      this.emit('error', toError(error));
       throw error;
     }
   }
@@ -453,13 +470,18 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   
   /**
    * Feed video samples to decoder gradually (don't overflow the queue)
+   *
+   * Stops once `maxFrameBuffer` decoded frames are waiting - decoded frames hold
+   * video memory, so the decoder must not run ahead of playback without bound.
+   * Draining in getVideoFrame() resumes feeding.
    */
   private feedDecoder(): void {
     if (!this.decoder) return;
-    
-    // Feed samples while decoder queue has room
-    while (this.nextSampleIndex < this.sampleQueue.length && 
-           this.decoder.decodeQueueSize < this.maxDecoderQueue) {
+
+    // Feed samples while decoder queue has room and the frame buffer isn't full
+    while (this.nextSampleIndex < this.sampleQueue.length &&
+           this.decoder.decodeQueueSize < this.maxDecoderQueue &&
+           this.frameBuffer.length < this.maxFrameBuffer) {
       const sample = this.sampleQueue[this.nextSampleIndex];
       this.decoder.decode({
         data: sample.data,
@@ -545,41 +567,44 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
    * Perform a seamless loop back to the start
    * This resets timing and decoder state for looping
    */
-  private async performSeamlessLoop(): Promise<void> {
+  private performSeamlessLoop(): void {
     this.logger.debug('Performing seamless loop');
-    
+    this.restartFromStart();
+
+    // Emit loop event
+    this.emit('loop');
+  }
+
+  /**
+   * Rewind to the first sample and refill the pipeline.
+   *
+   * The decoder is not reset - the first sample is a keyframe, so it can continue
+   * decoding from the start without reconfiguration.
+   */
+  private restartFromStart(): void {
     // Reset position to start
     this.currentPosition = 0;
-    
+
     // Reset playback timing
     this.playStartTime = performance.now();
     this.playStartPosition = 0;
-    
+
     // Clear existing frame buffer
-    for (const timedFrame of this.frameBuffer) {
-      timedFrame.frame.close();
-    }
-    this.frameBuffer = [];
-    
+    this.clearFrameBuffer();
+
     // Reset sample indices to start (samples are already in queue from initial load)
     this.nextSampleIndex = 0;
     this.nextAudioSampleIndex = 0;
-    
-    // No need to reset decoder - first frame is a keyframe so decoder can
-    // seamlessly continue decoding from the start without reconfiguration
-    
+
     // Reset audio player
     if (this.audioPlayer) {
       this.audioPlayer.clear();
       this.audioPlayer.resetTiming();
     }
-    
+
     // Feed decoders with samples from the start
     this.feedDecoder();
     this.feedAudioDecoder();
-    
-    // Emit loop event
-    this.emit('loop');
   }
   
   /**
@@ -589,7 +614,12 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
     if (this._state === 'error' || this._state === 'loading' || this._state === 'idle') {
       return;
     }
-    
+
+    // Playing after the end restarts from the beginning
+    if (this._state === 'ended') {
+      this.restartFromStart();
+    }
+
     // Resume extraction if needed
     this.fileSource?.start();
     
@@ -699,8 +729,12 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   
   /**
    * Get a video frame for rendering
-   * 
+   *
    * Call this in your render loop. Returns the appropriate frame for the current time.
+   *
+   * The player owns the returned frame and closes it when the next frame is due,
+   * so it is valid until the following call. Do not close it - draw from it, or
+   * `clone()` it if you need to hold on to it.
    */
   getVideoFrame(): VideoFrame | null {
     if (this._state === 'idle' || this._state === 'loading' || this._state === 'error') {
@@ -768,7 +802,10 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
         this.lastVideoFrame = timedFrame.frame;
       }
     }
-    
+
+    // Draining freed room in the frame buffer - keep the decoder fed
+    this.feedDecoder();
+
     return this.lastVideoFrame;
   }
   
@@ -800,7 +837,14 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   override dispose(full: boolean = false): void {
     // Stop extraction
     this.fileSource?.stop();
-    
+
+    // Release anyone waiting on the initial buffer so a reload can't strand them
+    if (this.bufferReadyResolve) {
+      const resolveBuffer = this.bufferReadyResolve;
+      this.bufferReadyResolve = null;
+      resolveBuffer();
+    }
+
     // Clear buffer
     this.clearFrameBuffer();
     

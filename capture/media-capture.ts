@@ -12,6 +12,8 @@ import {
   EncodedChunkEvent,
   AudioLevelEvent,
   DEFAULT_CAPTURE_CONFIG,
+  codecTypeToString,
+  parseProfileLevel,
 } from './capture-types';
 import { MediaStreamEncoder } from './media-encoder';
 import { ICaptureSink, SerializedPacket } from './capture-sink';
@@ -38,12 +40,24 @@ export type CaptureEventHandler<T> = (event: T) => void;
  * Media Capture - captures and encodes media from browser devices
  */
 export class MediaCapture {
+  /** How long start() waits for the encoders to configure */
+  private static readonly ENCODER_READY_TIMEOUT_MS = 5000;
+
   private config: MediaCaptureConfig;
   private sink: ICaptureSink;
   private encoder?: MediaStreamEncoder;
   private mediaStream?: MediaStream;
   private state: CaptureState = 'idle';
   private disposed = false;
+  private paused = false;
+
+  // Bitrate measurement over a sliding stats interval
+  private statsTimer?: ReturnType<typeof setInterval>;
+  private videoBytesSent = 0;
+  private audioBytesSent = 0;
+  private lastStatsSampleTime = 0;
+  private lastVideoBytesSent = 0;
+  private lastAudioBytesSent = 0;
 
   // Stats tracking
   private stats: CaptureStats = {
@@ -60,6 +74,14 @@ export class MediaCapture {
   // Captured stream metadata
   private videoMetadata?: { width: number; height: number };
   private audioMetadata?: { channels: number; sampleRate: number };
+
+  // Codec identity advertised in the wire header, resolved when encoding starts
+  private videoCodec: { type: sesame.v1.common.CodecType; profile: number; level: number } = {
+    type: CodecType.CODEC_TYPE_VIDEO_VP9,
+    profile: 0,
+    level: 0,
+  };
+  private audioCodec: sesame.v1.common.CodecType = CodecType.CODEC_TYPE_AUDIO_OPUS;
 
   // Event handlers
   private handlers = {
@@ -119,6 +141,52 @@ export class MediaCapture {
     if (this.state !== newState) {
       this.state = newState;
       this.emit('state-change', newState);
+    }
+  }
+
+  /**
+   * Recompute bitrates from the bytes sent since the previous sample
+   */
+  private sampleBitrates(): void {
+    const now = Date.now();
+    const elapsedMs = now - this.lastStatsSampleTime;
+
+    if (elapsedMs <= 0) {
+      return;
+    }
+
+    const videoDelta = this.videoBytesSent - this.lastVideoBytesSent;
+    const audioDelta = this.audioBytesSent - this.lastAudioBytesSent;
+    const perSecond = 8000 / elapsedMs; // bytes -> bits per second
+
+    this.stats.videoBitrate = Math.round(videoDelta * perSecond);
+    this.stats.audioBitrate = Math.round(audioDelta * perSecond);
+
+    this.lastStatsSampleTime = now;
+    this.lastVideoBytesSent = this.videoBytesSent;
+    this.lastAudioBytesSent = this.audioBytesSent;
+  }
+
+  private startStatsTimer(): void {
+    this.stopStatsTimer();
+
+    const interval = this.config.statsInterval ?? DEFAULT_CAPTURE_CONFIG.statsInterval;
+
+    // Baseline against the current totals so a restart doesn't report a spike
+    this.lastStatsSampleTime = Date.now();
+    this.lastVideoBytesSent = this.videoBytesSent;
+    this.lastAudioBytesSent = this.audioBytesSent;
+
+    this.statsTimer = setInterval(() => {
+      this.sampleBitrates();
+      this.emit('stats', this.getStats());
+    }, interval);
+  }
+
+  private stopStatsTimer(): void {
+    if (this.statsTimer !== undefined) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
     }
   }
 
@@ -236,6 +304,15 @@ export class MediaCapture {
         sampleRate: this.audioMetadata?.sampleRate,
       } : undefined;
 
+      // The wire header must describe what the encoder actually produces
+      if (videoEncoderOptions) {
+        const { profile, level } = parseProfileLevel(codecTypeToString(videoEncoderOptions.codec));
+        this.videoCodec = { type: videoEncoderOptions.codec, profile, level };
+      }
+      if (audioEncoderOptions) {
+        this.audioCodec = audioEncoderOptions.codec;
+      }
+
       this.encoder = new MediaStreamEncoder(
         this.mediaStream,
         videoEncoderOptions,
@@ -254,14 +331,13 @@ export class MediaCapture {
         this.setState('error');
       });
 
-      // Wait for encoder to be ready
-      await new Promise<void>((resolve) => {
-        this.encoder!.on('ready', () => resolve());
-        // Also resolve after timeout in case ready already fired
-        setTimeout(resolve, 100);
-      });
+      // Wait for the encoders to configure - a configuration failure arrives as an
+      // error event and must not be reported as a successful start
+      await this.waitForEncoderReady(this.encoder);
 
       this.stats.startTime = Date.now();
+      this.paused = false;
+      this.startStatsTimer();
       this.setState('capturing');
 
     } catch (err) {
@@ -278,6 +354,9 @@ export class MediaCapture {
       return;
     }
 
+    this.stopStatsTimer();
+    this.paused = false;
+
     // Stop encoder
     if (this.encoder) {
       this.encoder.dispose();
@@ -291,6 +370,37 @@ export class MediaCapture {
     }
 
     this.setState('stopped');
+  }
+
+  /**
+   * Pause publishing.
+   *
+   * Encoding continues so timestamps stay continuous and the media stream and
+   * permissions stay alive; encoded chunks are simply not handed to the sink.
+   */
+  pause(): void {
+    if (this.state !== 'capturing') {
+      return;
+    }
+
+    this.paused = true;
+    this.setState('paused');
+  }
+
+  /**
+   * Resume publishing after {@link pause}.
+   *
+   * Requests a keyframe so the receiver can start decoding again immediately
+   * rather than waiting for the next scheduled one.
+   */
+  resume(): void {
+    if (this.state !== 'paused') {
+      return;
+    }
+
+    this.paused = false;
+    this.setState('capturing');
+    this.requestKeyframe();
   }
 
   /**
@@ -323,8 +433,55 @@ export class MediaCapture {
     }
   }
 
+  /**
+   * Resolve when the encoders report ready, reject if one reports an error first.
+   *
+   * Resolves after ENCODER_READY_TIMEOUT_MS if neither arrives, so a browser that
+   * never reports readiness doesn't hang the caller.
+   */
+  private waitForEncoderReady(encoder: MediaStreamEncoder): Promise<void> {
+    if (!encoder.hasEncoders) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        encoder.off('ready', onReady);
+        encoder.off('error', onError);
+      };
+
+      const onReady = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      const onError = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        console.warn('MediaCapture: encoder did not report ready, continuing anyway');
+        resolve();
+      }, MediaCapture.ENCODER_READY_TIMEOUT_MS);
+
+      encoder.on('ready', onReady);
+      encoder.on('error', onError);
+    });
+  }
+
   private handleEncodedChunk(event: EncodedChunkEvent): void {
-    if (!this.sink.connected) {
+    if (this.paused || !this.sink.connected) {
       return;
     }
 
@@ -347,11 +504,13 @@ export class MediaCapture {
       // Send through sink
       this.sink.send(serializedPacket);
 
-      // Update stats
+      // Update stats - all byte counters track encoded payload, excluding wire framing
       if (event.type === 'video') {
         this.stats.videoFramesEncoded++;
+        this.videoBytesSent += chunkData.byteLength;
       } else {
         this.stats.audioFramesEncoded++;
+        this.audioBytesSent += chunkData.byteLength;
       }
       this.stats.bytesSent += chunkData.byteLength;
       this.stats.packetsSent++;
@@ -369,9 +528,9 @@ export class MediaCapture {
         pts: BigInt(event.timestamp),
         keyframe: event.keyframe,
         codecData: {
-          codecType: isVideo ? CodecType.CODEC_TYPE_VIDEO_VP9 : CodecType.CODEC_TYPE_AUDIO_OPUS,
-          codecProfile: 0,
-          codecLevel: 0,
+          codecType: isVideo ? this.videoCodec.type : this.audioCodec,
+          codecProfile: isVideo ? this.videoCodec.profile : 0,
+          codecLevel: isVideo ? this.videoCodec.level : 0,
           width: this.videoMetadata?.width || 0,
           height: this.videoMetadata?.height || 0,
           channels: this.audioMetadata?.channels || 0,
@@ -412,6 +571,7 @@ export class MediaCapture {
     if (this.disposed) return;
     this.disposed = true;
 
+    this.stopStatsTimer();
     this.stop();
     this.sink.dispose();
 

@@ -50,6 +50,7 @@ export class MoQCaptureSink extends BaseCaptureSink {
   private connecting = false;
   private disposed = false;
   private sessionOwned = false; // Track if we own the session
+  private listeningTo: MoqSessionBroadcaster | null = null; // Session the handlers are attached to
   
   // Track current group for video (multiple frames can be in a group)
   private currentVideoGroup: boolean = true; // Start with needing a new group
@@ -155,6 +156,7 @@ export class MoQCaptureSink extends BaseCaptureSink {
     if (this.session) {
       // Only dispose if we own the session
       if (this.sessionOwned) {
+        this.removeEventListeners();
         this.session.dispose();
         this.session = null;
       }
@@ -222,47 +224,74 @@ export class MoQCaptureSink extends BaseCaptureSink {
     }
   }
 
+  private handleTrackRequested = (trackName: string): void => {
+    if (trackName === this.moqConfig.videoTrack?.trackName) {
+      // Reset video group state - next frame needs to start a new group
+      this.currentVideoGroup = true;
+      // Request a keyframe from the encoder
+      this.requestKeyframe();
+    }
+  };
+
+  private handleSessionError = (error: Error): void => {
+    console.error('MoQ session error:', error);
+    // Some errors may indicate we need to reset group state
+    if (error.message?.includes('reset') || error.message?.includes('stream')) {
+      this.currentVideoGroup = true;
+    }
+  };
+
+  private handleStateChange = (status: SessionStatus): void => {
+    const wasConnected = this._connected;
+    this._connected = status.state === SessionState.CONNECTED;
+
+    // If we just disconnected, reset group state for reconnection
+    if (wasConnected && !this._connected) {
+      this.currentVideoGroup = true;
+    }
+  };
+
+  /**
+   * Attach session listeners, at most once per session instance
+   */
   private setupEventListeners(): void {
-    if (!this.session) return;
+    if (!this.session || this.listeningTo === this.session) {
+      return;
+    }
 
-    // Listen for track requests (when a new subscriber wants a track)
-    // This is the correct event name from stinky-moq-js
-    this.session.on('trackRequested', (trackName: string) => {
-      if (trackName === this.moqConfig.videoTrack?.trackName) {
-        // Reset video group state - next frame needs to start a new group
-        this.currentVideoGroup = true;
-        // Request a keyframe from the encoder
-        this.requestKeyframe();
-      }
-    });
+    this.removeEventListeners();
 
-    // Listen for errors
-    this.session.on('error', (error: Error) => {
-      console.error('MoQ session error:', error);
-      // Some errors may indicate we need to reset group state
-      if (error.message?.includes('reset') || error.message?.includes('stream')) {
-        this.currentVideoGroup = true;
-      }
-    });
+    this.session.on('trackRequested', this.handleTrackRequested);
+    this.session.on('error', this.handleSessionError);
+    this.session.on('stateChange', this.handleStateChange);
+    this.listeningTo = this.session;
+  }
 
-    // Listen for state changes to keep _connected in sync
-    this.session.on('stateChange', (status: SessionStatus) => {
-      const wasConnected = this._connected;
-      this._connected = status.state === SessionState.CONNECTED;
-      
-      // If we just disconnected, reset group state for reconnection
-      if (wasConnected && !this._connected) {
-        this.currentVideoGroup = true;
-      }
-    });
+  /**
+   * Detach listeners from whichever session currently has them
+   */
+  private removeEventListeners(): void {
+    if (!this.listeningTo) {
+      return;
+    }
+
+    this.listeningTo.off('trackRequested', this.handleTrackRequested);
+    this.listeningTo.off('error', this.handleSessionError);
+    this.listeningTo.off('stateChange', this.handleStateChange);
+    this.listeningTo = null;
   }
 
   dispose(): void {
     this.disposed = true;
-    // Only dispose session if we own it
+    this.removeEventListeners();
+
+    // Only dispose session if we own it, and clear it so disconnect() can't repeat it
     if (this.session && this.sessionOwned) {
       this.session.dispose();
+      this.session = null;
     }
+
+    this._connected = false;
     super.dispose();
   }
   
@@ -272,11 +301,13 @@ export class MoQCaptureSink extends BaseCaptureSink {
    * @param session - MoqSessionBroadcaster instance to use for broadcasting
    */
   setMoQSession(session: MoqSessionBroadcaster): void {
+    this.removeEventListeners();
+
     // Disconnect from previous session if we own it
     if (this.session && this.sessionOwned) {
       this.session.dispose();
     }
-    
+
     this.session = session;
     this.sessionOwned = false;
     this._connected = true;

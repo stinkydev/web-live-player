@@ -231,6 +231,82 @@ describe('MP4FileSource', () => {
       expect((source as any).loadedBytes).toBe(1000);
     });
     
+    it('should keep loading when the server never reveals the total size', async () => {
+      const CHUNK_SIZE = 4 * 1024 * 1024;
+      const noHeaders = { get: () => null };
+
+      const fetchMock = vi.fn()
+        // HEAD request fails, so there is no Content-Length
+        .mockRejectedValueOnce(new Error('HEAD not supported'))
+        // Ranges are supported, but no Content-Range is returned
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 206,
+          headers: noHeaders,
+          arrayBuffer: () => Promise.resolve(new ArrayBuffer(CHUNK_SIZE))
+        })
+        // A short chunk marks the end of the file
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 206,
+          headers: noHeaders,
+          arrayBuffer: () => Promise.resolve(new ArrayBuffer(1000))
+        });
+
+      global.fetch = fetchMock;
+
+      try {
+        await source.loadFromUrl('http://example.com/video.mp4');
+      } catch {
+        // Expected - no valid MP4 data
+      }
+
+      // Without this, loading stopped after the first chunk and truncated the file
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock.mock.calls[2]).toEqual([
+        'http://example.com/video.mp4',
+        { headers: { 'Range': `bytes=${CHUNK_SIZE}-${CHUNK_SIZE * 2 - 1}` } }
+      ]);
+      expect((source as any).loadedBytes).toBe(CHUNK_SIZE + 1000);
+    });
+
+    it('should treat 416 as the end of the file', async () => {
+      const CHUNK_SIZE = 4 * 1024 * 1024;
+      const noHeaders = { get: () => null };
+      const onErrorMock = vi.fn();
+      const rangeSource = new MP4FileSource({ onError: onErrorMock });
+
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(new Error('HEAD not supported'))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 206,
+          headers: noHeaders,
+          arrayBuffer: () => Promise.resolve(new ArrayBuffer(CHUNK_SIZE))
+        })
+        // Requested range is past the end
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 416,
+          statusText: 'Range Not Satisfiable',
+          headers: noHeaders,
+        });
+
+      global.fetch = fetchMock;
+
+      try {
+        await rangeSource.loadFromUrl('http://example.com/video.mp4');
+      } catch {
+        // Expected - no valid MP4 data
+      }
+
+      expect(onErrorMock).not.toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.stringContaining('416')
+      }));
+      expect((rangeSource as any).loadedBytes).toBe(CHUNK_SIZE);
+      rangeSource.dispose();
+    });
+
     it('should throw error on HTTP failure', async () => {
       const fetchMock = vi.fn()
         // HEAD request

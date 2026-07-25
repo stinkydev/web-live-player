@@ -52,22 +52,26 @@ self.onmessage = async (event) => {
 };
 
 function createEncoder(config: AudioEncoderConfig) {
-  audioEncoder = new AudioEncoder({
-    output: (chunk, metadata) => {
-      // Send encoded chunks back to main thread
-      self.postMessage({ 
-        type: 'chunk', 
-        data: chunk,
-        metadata: metadata
-      });
-    },
-    error: (err) => {
-      self.postMessage({ type: 'error', data: err.message });
-    },
-  });
+  try {
+    audioEncoder = new AudioEncoder({
+      output: (chunk, metadata) => {
+        // Send encoded chunks back to main thread
+        self.postMessage({
+          type: 'chunk',
+          data: chunk,
+          metadata: metadata
+        });
+      },
+      error: (err) => {
+        self.postMessage({ type: 'error', data: err.message });
+      },
+    });
 
-  audioEncoder.configure(config);
-  self.postMessage({ type: 'ready' });
+    audioEncoder.configure(config);
+    self.postMessage({ type: 'ready' });
+  } catch (err) {
+    self.postMessage({ type: 'error', data: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 // @ts-ignore AudioData type
@@ -109,6 +113,29 @@ function closeEncoder() {
   self.postMessage({ type: 'closed' });
 }
 
+/**
+ * Whether decoded frames are planar (one plane per channel) or interleaved.
+ * Probing throws for interleaved formats, so the result is cached.
+ */
+let planar: boolean | undefined;
+
+// @ts-ignore AudioData type
+function isPlanar(frame: AudioData): boolean {
+  if (planar === undefined) {
+    try {
+      if (frame.numberOfChannels > 1) {
+        frame.allocationSize({ planeIndex: 1, frameOffset: 0, frameCount: 1 });
+        planar = true;
+      } else {
+        planar = false;
+      }
+    } catch {
+      planar = false;
+    }
+  }
+  return planar;
+}
+
 // @ts-ignore AudioData type
 function calculateAndSendAudioLevels(frame: AudioData) {
   // Throttle audio level messages
@@ -116,29 +143,41 @@ function calculateAndSendAudioLevels(frame: AudioData) {
   if (now - lastAudioLevelTime < audioLevelInterval) {
     return;
   }
-  
+
   lastAudioLevelTime = now;
-  
+
   try {
-    // Get audio data from the frame
-    const numChannels = frame.numberOfChannels || 2;
-    const samples = new Float32Array(frame.allocationSize({ planeIndex: 0 }) / 4);
-    frame.copyTo(samples, { planeIndex: 0 });
-    
-    // Calculate RMS levels for each channel
+    const numChannels = frame.numberOfChannels || 1;
     const channelLevels: number[] = [];
-    const samplesPerChannel = samples.length / numChannels;
-    
-    for (let channel = 0; channel < numChannels; channel++) {
-      let sum = 0;
-      for (let i = 0; i < samplesPerChannel; i++) {
-        const sample = samples[i * numChannels + channel];
-        sum += sample * sample;
+
+    if (isPlanar(frame)) {
+      // One plane per channel - each plane holds that channel's samples contiguously
+      for (let channel = 0; channel < numChannels; channel++) {
+        const plane = new Float32Array(frame.allocationSize({ planeIndex: channel }) / 4);
+        frame.copyTo(plane, { planeIndex: channel });
+
+        let sum = 0;
+        for (let i = 0; i < plane.length; i++) {
+          sum += plane[i] * plane[i];
+        }
+        channelLevels[channel] = plane.length > 0 ? Math.sqrt(sum / plane.length) : 0;
       }
-      const rms = Math.sqrt(sum / samplesPerChannel);
-      channelLevels[channel] = rms;
+    } else {
+      // Single plane with channels interleaved sample by sample
+      const samples = new Float32Array(frame.allocationSize({ planeIndex: 0 }) / 4);
+      frame.copyTo(samples, { planeIndex: 0 });
+
+      const samplesPerChannel = Math.floor(samples.length / numChannels);
+      for (let channel = 0; channel < numChannels; channel++) {
+        let sum = 0;
+        for (let i = 0; i < samplesPerChannel; i++) {
+          const sample = samples[i * numChannels + channel];
+          sum += sample * sample;
+        }
+        channelLevels[channel] = samplesPerChannel > 0 ? Math.sqrt(sum / samplesPerChannel) : 0;
+      }
     }
-    
+
     // Send level data to main thread
     self.postMessage({
       type: 'audio-levels',
@@ -147,7 +186,7 @@ function calculateAndSendAudioLevels(frame: AudioData) {
         timestamp: now
       }
     });
-    
+
   } catch (err) {
     // Silently ignore audio level errors
   }

@@ -64,6 +64,7 @@ export class MP4FileSource {
   private totalAudioSamples: number = 0;
   private samplesRequested: boolean = false;
   private isProgressiveLoading: boolean = false;
+  private endReported: boolean = false;
   
   // File loading state
   private fileSize: number = 0;
@@ -187,15 +188,7 @@ export class MP4FileSource {
           this.isProgressiveLoading = true;
           
           // Try to get file size from Content-Range header if we don't have it yet
-          if (!this.fileSize) {
-            const contentRange = firstResponse.headers.get('Content-Range');
-            if (contentRange) {
-              const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
-              if (match) {
-                this.fileSize = parseInt(match[1], 10);
-              }
-            }
-          }
+          this.readFileSizeFromRange(firstResponse);
           
           // Process first chunk
           const firstChunk = await firstResponse.arrayBuffer();
@@ -209,54 +202,54 @@ export class MP4FileSource {
           // Check if first chunk already gave us metadata and samples
           if (metadataResolved && samplesReceived) {
             // Only start background loading if there's more to load
-            if (offset < this.fileSize) {
-              this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
-            } else {
+            if (this.isFullyLoaded(offset, firstChunk.byteLength, CHUNK_SIZE)) {
               this.mp4File?.flush();
+            } else {
+              this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
             }
             resolve(this.fileInfo!);
             return;
           }
           
           // Continue loading chunks until we have metadata AND samples
-          while (offset < this.fileSize && (!metadataResolved || !samplesReceived)) {
-            const end = Math.min(offset + CHUNK_SIZE - 1, this.fileSize - 1);
-            
-            const response = await fetch(url, {
-              headers: { 'Range': `bytes=${offset}-${end}` }
-            });
-            
-            if (!response.ok && response.status !== 206) {
-              throw new Error(`Failed to fetch chunk: ${response.status} ${response.statusText}`);
+          let complete = this.isFullyLoaded(offset, firstChunk.byteLength, CHUNK_SIZE);
+
+          while (!complete && (!metadataResolved || !samplesReceived)) {
+            const chunk = await this.fetchChunk(url, offset, CHUNK_SIZE);
+            if (!chunk) {
+              complete = true;
+              break;
             }
-            
-            const chunk = await response.arrayBuffer();
+
             const buffer = chunk as ArrayBuffer & { fileStart: number };
             buffer.fileStart = offset;
-            
+
             offset += chunk.byteLength;
             this.loadedBytes = offset;
             this.events.onProgress?.(this.loadedBytes, this.fileSize);
-            
+
             this.mp4File?.appendBuffer(buffer);
-            
+            complete = this.isFullyLoaded(offset, chunk.byteLength, CHUNK_SIZE);
+
             // If we have metadata and samples, we can resolve
             if (metadataResolved && samplesReceived) {
-              this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
-              resolve(this.fileInfo!);
-              return;
+              break;
             }
           }
-          
+
+          if (!complete) {
+            this.continueLoadingInBackground(url, offset, CHUNK_SIZE);
+            resolve(this.fileInfo!);
+            return;
+          }
+
           // Loaded everything
-          if (offset >= this.fileSize) {
-            this.mp4File?.flush();
-            
-            if (this.fileInfo) {
-              resolve(this.fileInfo);
-            } else {
-              reject(new Error('File loaded but no video track found'));
-            }
+          this.mp4File?.flush();
+
+          if (this.fileInfo) {
+            resolve(this.fileInfo);
+          } else {
+            reject(new Error('File loaded but no video track found'));
           }
         } catch (error) {
           reject(error);
@@ -273,41 +266,96 @@ export class MP4FileSource {
   private continueLoadingInBackground(url: string, startOffset: number, chunkSize: number): void {
     (async () => {
       let offset = startOffset;
-      
+
       try {
-        while (offset < this.fileSize) {
-          const end = Math.min(offset + chunkSize - 1, this.fileSize - 1);
-          
-          const response = await fetch(url, {
-            headers: {
-              'Range': `bytes=${offset}-${end}`
-            }
-          });
-          
-          if (!response.ok && response.status !== 206) {
-            this.events.onError?.(new Error(`Failed to fetch chunk: ${response.status}`));
+        for (;;) {
+          const chunk = await this.fetchChunk(url, offset, chunkSize);
+          if (!chunk) {
             break;
           }
-          
-          const chunk = await response.arrayBuffer();
-          
+
           const buffer = chunk as ArrayBuffer & { fileStart: number };
           buffer.fileStart = offset;
-          
+
           // Update offset and loaded bytes consistently
           offset += chunk.byteLength;
           this.loadedBytes = offset;
           this.events.onProgress?.(this.loadedBytes, this.fileSize);
-          
+
           this.mp4File?.appendBuffer(buffer);
+
+          if (this.isFullyLoaded(offset, chunk.byteLength, chunkSize)) {
+            break;
+          }
         }
-        
+
         // Flush when complete
         this.mp4File?.flush();
       } catch (error) {
         this.events.onError?.(error as Error);
       }
     })();
+  }
+
+  /**
+   * Fetch one range of the file.
+   *
+   * Returns null when the server indicates there is nothing left to read, which is
+   * how the end is detected when the total size was never advertised.
+   */
+  private async fetchChunk(url: string, offset: number, chunkSize: number): Promise<ArrayBuffer | null> {
+    const end = this.fileSize > 0
+      ? Math.min(offset + chunkSize - 1, this.fileSize - 1)
+      : offset + chunkSize - 1;
+
+    const response = await fetch(url, {
+      headers: { 'Range': `bytes=${offset}-${end}` }
+    });
+
+    // Range beyond the end of the file
+    if (response.status === 416) {
+      return null;
+    }
+
+    if (!response.ok && response.status !== 206) {
+      throw new Error(`Failed to fetch chunk: ${response.status} ${response.statusText}`);
+    }
+
+    // The server may only reveal the total size on later responses
+    this.readFileSizeFromRange(response);
+
+    const chunk = await response.arrayBuffer();
+    return chunk.byteLength > 0 ? chunk : null;
+  }
+
+  /**
+   * Whether the whole file has been read.
+   *
+   * With a known total size this is a simple offset comparison; without one, a
+   * chunk shorter than requested marks the end.
+   */
+  private isFullyLoaded(offset: number, lastChunkBytes: number, chunkSize: number): boolean {
+    if (this.fileSize > 0) {
+      return offset >= this.fileSize;
+    }
+    return lastChunkBytes < chunkSize;
+  }
+
+  /**
+   * Record the total file size from a Content-Range header, if not already known
+   */
+  private readFileSizeFromRange(response: Response): void {
+    if (this.fileSize) {
+      return;
+    }
+
+    const contentRange = response.headers.get('Content-Range');
+    if (contentRange) {
+      const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+      if (match) {
+        this.fileSize = parseInt(match[1], 10);
+      }
+    }
   }
   
   /**
@@ -593,9 +641,9 @@ export class MP4FileSource {
   private handleSamples(trackId: number, samples: Sample[]): void {
     const isVideo = trackId === this.videoTrackId;
     const track = isVideo ? this.videoTrack : this.audioTrack;
-    
-    if (!track) return;
-    
+
+    if (!track || samples.length === 0) return;
+
     const decodableSamples: DecodableSample[] = samples
       .filter(sample => sample.data != null)
       .map(sample => {
@@ -615,9 +663,10 @@ export class MP4FileSource {
     // Update sample indices
     if (isVideo) {
       this.nextVideoSampleIndex += samples.length;
-      
-      // Check if we've reached the end
-      if (this.nextVideoSampleIndex >= this.totalVideoSamples) {
+
+      // Check if we've reached the end - report it once
+      if (!this.endReported && this.nextVideoSampleIndex >= this.totalVideoSamples) {
+        this.endReported = true;
         this.events.onEnded?.();
       }
     } else {
@@ -648,7 +697,8 @@ export class MP4FileSource {
     // Reset sample indices
     this.nextVideoSampleIndex = 0;
     this.nextAudioSampleIndex = 0;
-    
+    this.endReported = false;
+
     // Restart extraction from new position
     this.samplesRequested = false;
     this.mp4File.stop();
