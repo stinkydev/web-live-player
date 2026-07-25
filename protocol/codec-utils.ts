@@ -13,9 +13,20 @@ export interface Timebase {
 }
 
 /**
+ * Microsecond timebase - the player's internal timestamp unit.
+ * Shared constant so hot paths don't allocate a literal per frame.
+ */
+export const MICROSECOND_TIMEBASE: Timebase = { num: 1, den: 1_000_000 };
+
+/**
+ * PTS value accepted by rescaleTime: plain number, bigint, or a protobufjs Long
+ */
+export type PtsValue = number | bigint | null | undefined | { toString(): string };
+
+/**
  * Convert a pts value (number, Long, or bigint) to bigint
  */
-function toBigInt(value: number | bigint | null | undefined | { toString(): string }): bigint {
+function toBigInt(value: PtsValue): bigint {
   if (value === null || value === undefined) return 0n;
   if (typeof value === 'bigint') return value;
   if (typeof value === 'number') return BigInt(Math.floor(value));
@@ -24,13 +35,62 @@ function toBigInt(value: number | bigint | null | undefined | { toString(): stri
 }
 
 /**
- * Rescale a timestamp from one timebase to another
+ * Try to get a safe-integer number from a pts value without allocating.
+ * Returns null if the value isn't representable exactly as a Number.
  */
-export function rescaleTime(pts: number | bigint | null | undefined | { toString(): string }, source: Timebase, target: Timebase): number {
+function toSafeNumber(value: PtsValue): number | null {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'number') {
+    const floored = Math.floor(value);
+    return Number.isSafeInteger(floored) ? floored : null;
+  }
+  if (typeof value === 'bigint') {
+    return value <= 9007199254740991n && value >= -9007199254740991n ? Number(value) : null;
+  }
+  // Long from protobufjs: toNumber() is exact below 2^53
+  const toNumber = (value as { toNumber?: () => number }).toNumber;
+  if (typeof toNumber === 'function') {
+    const n = toNumber.call(value);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Rescale a timestamp from one timebase to another.
+ *
+ * Uses plain Number arithmetic while every intermediate stays exact
+ * (which is the case for all real stream timestamps) and falls back to
+ * BigInt only on overflow - BigInt math allocates, and this runs per frame.
+ */
+export function rescaleTime(pts: PtsValue, source: Timebase, target: Timebase): number {
+  const ptsNum = toSafeNumber(pts);
+  if (ptsNum !== null) {
+    const numerator = ptsNum * source.num * target.den;
+    const denominator = source.den * target.num;
+    if (Number.isSafeInteger(numerator) && denominator !== 0) {
+      // Truncate toward zero to match BigInt division semantics
+      return Math.trunc(numerator / denominator);
+    }
+  }
+
   const ptsBigInt = toBigInt(pts);
   // Convert to target timebase: pts * (source.num / source.den) * (target.den / target.num)
   const scaledPts = (ptsBigInt * BigInt(source.num) * BigInt(target.den)) / (BigInt(source.den) * BigInt(target.num));
   return Number(scaledPts);
+}
+
+/**
+ * Get the source timebase declared by codec data, defaulting to microseconds.
+ *
+ * Callers should cache the result alongside the codec data rather than calling
+ * this per frame - it allocates.
+ */
+export function timebaseFromCodecData(codecData: IMediaCodecData | undefined | null): Timebase {
+  if (codecData?.timebaseDen && codecData?.timebaseNum) {
+    return { num: codecData.timebaseNum, den: codecData.timebaseDen };
+  }
+  return MICROSECOND_TIMEBASE;
 }
 
 /**

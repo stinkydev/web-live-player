@@ -66,6 +66,13 @@ export class MediaStreamEncoder {
   }
 
   /**
+   * Whether any encoder was created - false when the stream had no usable tracks
+   */
+  get hasEncoders(): boolean {
+    return this.hasAudio || this.hasVideo;
+  }
+
+  /**
    * Register event handler
    */
   on(event: 'chunk', handler: EncoderEventHandler<EncodedChunkEvent>): this;

@@ -302,6 +302,111 @@ describe('FrameScheduler', () => {
     });
   });
   
+  describe('Degenerate Configuration', () => {
+    it('should not spin when maxBufferSize is 0', () => {
+      const degenerate = new FrameScheduler<MockFrame>({
+        bufferDelayMs: 100,
+        maxBufferSize: 0,
+        onFrameDropped: (frame) => { frame.closed = true; },
+      });
+
+      // Without a floor of 1, enqueue()'s overflow loop never terminates
+      degenerate.enqueue(createMockFrame(1), 0, createTiming());
+      degenerate.enqueue(createMockFrame(2), 20000, createTiming());
+
+      expect(degenerate.getStatus().currentBufferSize).toBe(1);
+      expect(degenerate.getStatus().totalEnqueuedFrames).toBe(2);
+    });
+
+    it('should not spin when maxBufferSize is negative', () => {
+      const degenerate = new FrameScheduler<MockFrame>({ maxBufferSize: -5 });
+      degenerate.enqueue(createMockFrame(1), 0, createTiming());
+      expect(degenerate.getStatus().currentBufferSize).toBe(1);
+    });
+  });
+
+  describe('Ring Buffer Reuse', () => {
+    it('should keep returning frames in order as the ring wraps', () => {
+      const t0 = 1_000_000; // arbitrary fixed clock in ms
+      const frameMs = 20;   // 50fps, matches the 20000us timestamps
+
+      // Prime the buffer so the sync point is established on the first dequeue
+      for (let i = 0; i < 6; i++) {
+        scheduler.enqueue(createMockFrame(i), i * 20000, createTiming());
+      }
+
+      // Drive 30 dequeues - the 10-slot ring wraps three times
+      for (let i = 0; i < 30; i++) {
+        const frame = scheduler.dequeue(t0 + i * frameMs);
+        expect(frame).not.toBeNull();
+        expect(frame!.id).toBe(i);
+
+        const next = i + 6;
+        scheduler.enqueue(createMockFrame(next), next * 20000, createTiming());
+      }
+
+      expect(scheduler.getStatus().totalDequeuedFrames).toBe(30);
+      expect(droppedFrames.length).toBe(0);
+    });
+
+    it('should not retain references to dequeued frames', () => {
+      for (let i = 0; i < 5; i++) {
+        scheduler.enqueue(createMockFrame(i), i * 20000, createTiming());
+      }
+      scheduler.dequeue(performance.now());
+
+      // clear() must only report frames still buffered
+      scheduler.clear();
+      expect(droppedFrames.length).toBe(4);
+      expect(droppedFrames.map(d => d.frame.id)).toEqual([1, 2, 3, 4]);
+    });
+  });
+
+  describe('Packet Timing History', () => {
+    it('should return entries oldest first', () => {
+      for (let i = 0; i < 5; i++) {
+        scheduler.enqueue(createMockFrame(i), i * 20000, createTiming());
+      }
+
+      const history = scheduler.getPacketTimingHistory();
+      expect(history.length).toBe(5);
+      expect(history.map(e => e.streamTimestampUs)).toEqual([0, 20000, 40000, 60000, 80000]);
+    });
+
+    it('should cap history and keep the most recent entries', () => {
+      const s = new FrameScheduler<MockFrame>({ bufferDelayMs: 100, maxBufferSize: 10 });
+      for (let i = 0; i < 350; i++) {
+        s.enqueue(createMockFrame(i), i * 20000, createTiming());
+      }
+
+      const history = s.getPacketTimingHistory();
+      expect(history.length).toBe(300);
+      expect(history[0].streamTimestampUs).toBe(50 * 20000);
+      expect(history[299].streamTimestampUs).toBe(349 * 20000);
+    });
+
+    it('should mark dropped frames', () => {
+      const bypass = new FrameScheduler<MockFrame>({ bufferDelayMs: 0 });
+      bypass.enqueue(createMockFrame(1), 0, createTiming());
+      bypass.enqueue(createMockFrame(2), 20000, createTiming());
+      bypass.enqueue(createMockFrame(3), 40000, createTiming());
+
+      bypass.dequeue(performance.now());
+
+      const history = bypass.getPacketTimingHistory();
+      expect(history.map(e => e.wasDropped)).toEqual([true, true, false]);
+    });
+
+    it('should return copies rather than live entries', () => {
+      scheduler.enqueue(createMockFrame(1), 0, createTiming());
+
+      const first = scheduler.getPacketTimingHistory();
+      first[0].streamTimestampUs = 999;
+
+      expect(scheduler.getPacketTimingHistory()[0].streamTimestampUs).toBe(0);
+    });
+  });
+
   describe('Auto-calculated Max Buffer Size', () => {
     it('should auto-calculate max buffer based on delay', () => {
       // With 500ms delay at 60fps, should have at least 60 frames (2x buffer)

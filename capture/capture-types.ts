@@ -50,6 +50,8 @@ export interface CaptureConfig {
   audioLevelMonitoring?: boolean;
   /** Audio level reporting interval in ms */
   audioLevelInterval?: number;
+  /** How often the 'stats' event is emitted and bitrates are recomputed, in ms */
+  statsInterval?: number;
 }
 
 /**
@@ -81,6 +83,7 @@ export const DEFAULT_CAPTURE_CONFIG: Required<CaptureConfig> = {
   },
   audioLevelMonitoring: false,
   audioLevelInterval: 50,
+  statsInterval: 1000,
 };
 
 /**
@@ -125,9 +128,9 @@ export interface CaptureStats {
   bytesSent: number;
   /** Packets sent */
   packetsSent: number;
-  /** Current video bitrate */
+  /** Video bitrate in bits per second, measured over the last stats interval */
   videoBitrate: number;
-  /** Current audio bitrate */
+  /** Audio bitrate in bits per second, measured over the last stats interval */
   audioBitrate: number;
   /** Capture start time */
   startTime: number;
@@ -171,10 +174,25 @@ export function codecTypeToString(codec: sesame.v1.common.CodecType): string {
     case CodecType.CODEC_TYPE_AUDIO_AAC:
       return 'mp4a.40.2';
     case CodecType.CODEC_TYPE_AUDIO_PCM:
-      return 'pcm';
+      // WebCodecs has no PCM encoder, and 'pcm' is not a valid codec string
+      throw new Error('PCM audio capture is not supported');
     default:
       throw new Error(`Unsupported codec type: ${codec}`);
   }
+}
+
+/**
+ * Profile and level bytes for a WebCodecs codec string, when it encodes them.
+ *
+ * AVC codec strings are `avc1.PPCCLL` (profile, constraints, level as hex).
+ * Returns zeros for codecs that carry no profile/level in the string.
+ */
+export function parseProfileLevel(codecString: string): { profile: number; level: number } {
+  const avc = /^avc1\.([0-9a-fA-F]{2})[0-9a-fA-F]{2}([0-9a-fA-F]{2})$/.exec(codecString);
+  if (avc) {
+    return { profile: parseInt(avc[1], 16), level: parseInt(avc[2], 16) };
+  }
+  return { profile: 0, level: 0 };
 }
 
 /**

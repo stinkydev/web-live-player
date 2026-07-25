@@ -3,7 +3,7 @@
  */
 
 import { ParsedFrame, IMediaCodecData } from '@stinkycomputing/sesame-api-client';
-import { rescaleTime, getCodecString } from '../protocol/codec-utils';
+import { rescaleTime, getCodecString, timebaseFromCodecData, MICROSECOND_TIMEBASE } from '../protocol/codec-utils';
 import type { Logger } from '../types';
 import { consoleLogger } from '../types';
 import type { IVideoDecoder } from './decoder-interface';
@@ -177,17 +177,19 @@ export class WebCodecsDecoder implements IVideoDecoder {
   
   /**
    * Decode a binary packet
+   *
+   * @param timestampUs - Optional pre-rescaled PTS in microseconds (skips the rescale)
    */
-  decodeBinary(data: ParsedFrame): void {
+  decodeBinary(data: ParsedFrame, timestampUs?: number): void {
     if (this.flushing) {
       this.logger.warn('Received packet while flushing');
       return;
     }
-    
+
     if (!data.header || !data.payload || !this.decoder || this.decoder.state !== 'configured') {
       return;
     }
-    
+
     // Check for queue overflow
     if (this.decoder.decodeQueueSize > this.maxQueueSize) {
       if (this.onQueueOverflow) {
@@ -195,14 +197,14 @@ export class WebCodecsDecoder implements IVideoDecoder {
       }
       return;
     }
-    
-    // Convert timestamp to microseconds
-    const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
-      ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
-      : { num: 1, den: 1000000 };
-    const microsecondTimebase = { num: 1, den: 1000000 };
-    const pts = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
-    
+
+    // Convert timestamp to microseconds (unless the caller already did)
+    const pts = timestampUs ?? rescaleTime(
+      data.header.media?.pts ?? 0,
+      timebaseFromCodecData(data.header.media?.codecData),
+      MICROSECOND_TIMEBASE
+    );
+
     const chunk = new EncodedVideoChunk({
       timestamp: pts,
       type: data.header.media?.keyframe ? 'key' : 'delta',

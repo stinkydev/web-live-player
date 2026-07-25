@@ -20,7 +20,7 @@ self.onmessage = async (event) => {
 
   switch (type) {
     case 'init':
-      gopSize = data.config.gopSize || 60;
+      gopSize = data.gopSize || 60;
       createEncoder(data.config);
       break;
       
@@ -48,21 +48,25 @@ self.onmessage = async (event) => {
 };
 
 function createEncoder(config: VideoEncoderConfig) {
-  videoEncoder = new VideoEncoder({
-    output: (chunk, metadata) => {
-      self.postMessage({ 
-        type: 'chunk', 
-        data: chunk,
-        metadata: metadata
-      });
-    },
-    error: (err) => {
-      self.postMessage({ type: 'error', data: err.message });
-    },
-  });
+  try {
+    videoEncoder = new VideoEncoder({
+      output: (chunk, metadata) => {
+        self.postMessage({
+          type: 'chunk',
+          data: chunk,
+          metadata: metadata
+        });
+      },
+      error: (err) => {
+        self.postMessage({ type: 'error', data: err.message });
+      },
+    });
 
-  videoEncoder.configure(config);
-  self.postMessage({ type: 'ready' });
+    videoEncoder.configure(config);
+    self.postMessage({ type: 'ready' });
+  } catch (err) {
+    self.postMessage({ type: 'error', data: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 function encodeFrame(frame: VideoFrame) {

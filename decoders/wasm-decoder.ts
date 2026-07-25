@@ -7,7 +7,7 @@
 
 // @ts-ignore - Worker import with inline for library bundling
 import H264Worker from './wasm-worker/H264NALDecoder.worker?worker&inline';
-import { rescaleTime } from '../protocol/codec-utils';
+import { rescaleTime, timebaseFromCodecData, MICROSECOND_TIMEBASE } from '../protocol/codec-utils';
 import type { YUVFrame } from '../types';
 import type { IVideoDecoder } from './decoder-interface';
 import { ParsedFrame } from '@stinkycomputing/sesame-api-client';
@@ -22,23 +22,31 @@ export interface WasmDecoderConfig {
   maxQueueSize?: number;
 }
 
+/**
+ * The worker copies each NAL into a fixed 1 MB scratch buffer, so anything larger
+ * cannot be submitted.
+ */
+const MAX_NAL_SIZE = 1024 * 1024;
+
 export class WasmDecoder implements IVideoDecoder {
   private worker?: Worker;
   private _queueSize: number = 0;
-  private pendingTimestamps: number[] = [];
-  private pendingFrames: Uint8Array[] = [];
-  
+  /** Access units submitted, used to discard pictures decoded before a flush */
+  private seq: number = 0;
+  private flushSeq: number = 0;
+
   private onFrameDecoded?: (frame: YUVFrame) => void;
   private onError?: (error: Error) => void;
-  // @ts-ignore - kept for future use
   private onQueueOverflow?: (queueSize: number) => void;
-  
+  private maxQueueSize: number;
+
   public configured: boolean = false;
-  
+
   constructor(config: WasmDecoderConfig = {}) {
     this.onFrameDecoded = config.onFrameDecoded;
     this.onError = config.onError;
     this.onQueueOverflow = config.onQueueOverflow;
+    this.maxQueueSize = config.maxQueueSize ?? 10;
   }
   
   get queueSize(): number {
@@ -67,8 +75,9 @@ export class WasmDecoder implements IVideoDecoder {
     this.worker = new H264Worker();
     this.configured = false;
     this._queueSize = 0;
-    this.pendingTimestamps = [];
-    
+    this.seq = 0;
+    this.flushSeq = 0;
+
     return new Promise((resolve, reject) => {
       this.worker!.addEventListener('message', (e: MessageEvent) => {
         const message = e.data;
@@ -100,65 +109,84 @@ export class WasmDecoder implements IVideoDecoder {
   
   /**
    * Decode a binary packet (same interface as WebCodecsDecoder)
+   *
+   * @param timestampUs - Optional pre-rescaled PTS in microseconds (skips the rescale)
    */
-  decodeBinary(data: ParsedFrame): void {
+  decodeBinary(data: ParsedFrame, timestampUs?: number): void {
     if (!this.worker || !this.configured || !data.header || !data.payload) {
       return;
     }
-    
-    // IMPORTANT: Create a NEW Uint8Array copy - the payload is a slice of a larger buffer
-    // that would be detached if we transfer it directly
-    const arr = new Uint8Array(data.payload);
-    
-    // Convert timestamp to microseconds
-    const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
-      ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
-      : { num: 1, den: 1000000 };
-    const microsecondTimebase = { num: 1, den: 1000000 };
-    const pts = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
-    
-    // Queue the frame (matching Elmo's working implementation)
-    this.pendingFrames.push(arr);
-    this.pendingTimestamps.push(pts);
-    this.decodeNext();
-  }
-  
-  /**
-   * Process next frame from queue
-   */
-  private decodeNext(): void {
-    const nextFrame = this.pendingFrames.shift();
-    if (nextFrame != null) {
-      this.decode(nextFrame);
+
+    // Back-pressure: drop the access unit rather than growing the worker's queue
+    if (this._queueSize > this.maxQueueSize) {
+      this.onQueueOverflow?.(this._queueSize);
+      return;
+    }
+
+    // Convert timestamp to microseconds (unless the caller already did)
+    const pts = timestampUs ?? rescaleTime(
+      data.header.media?.pts ?? 0,
+      timebaseFromCodecData(data.header.media?.codecData),
+      MICROSECOND_TIMEBASE
+    );
+
+    const seq = this.seq++;
+    let expectsPicture = false;
+
+    // The worker decodes one NAL per message, so split the access unit
+    forEachNAL(data.payload, (nal) => {
+      if (nal.byteLength > MAX_NAL_SIZE) {
+        this.onError?.(new Error(`NAL of ${nal.byteLength} bytes exceeds the decoder's ${MAX_NAL_SIZE} byte limit`));
+        return;
+      }
+      if (carriesPicture(nal)) {
+        expectsPicture = true;
+      }
+      this.decode(nal, pts, seq);
+    });
+
+    // Only slices produce a picture; counting parameter sets would stall the queue
+    if (expectsPicture) {
+      this._queueSize++;
     }
   }
-  
+
   /**
-   * Send frame to worker for decoding
+   * Send a single NAL to the worker for decoding
    */
-  private decode(data: Uint8Array): void {
+  private decode(nal: Uint8Array, pts: number, seq: number): void {
     if (!this.worker || !this.configured) {
       return;
     }
-    
-    this._queueSize++;
-    
-    // Send to worker - transfer the buffer
+
+    // Copy into its own buffer so it can be transferred without detaching the payload
+    const owned = new Uint8Array(nal.byteLength);
+    owned.set(nal);
+
     this.worker.postMessage({
       type: 'decode',
-      data: data.buffer,
-      offset: data.byteOffset,
-      length: data.byteLength,
-      renderStateId: 1
-    }, [data.buffer]);
+      data: owned.buffer,
+      offset: 0,
+      length: owned.byteLength,
+      renderStateId: 1,
+      pts,
+      seq,
+    }, [owned.buffer]);
   }
-  
+
   /**
    * Handle decoded picture from worker
    */
-  private handlePictureReady(message: { width: number; height: number; data: ArrayBuffer }): void {
-    this._queueSize--;
-    
+  private handlePictureReady(message: { width: number; height: number; data: ArrayBuffer; pts?: number; seq?: number }): void {
+    // Discard pictures that were decoded before the last flush
+    if ((message.seq ?? 0) < this.flushSeq) {
+      return;
+    }
+
+    if (this._queueSize > 0) {
+      this._queueSize--;
+    }
+
     const { width, height, data } = message;
     const buffer = new Uint8Array(data);
     
@@ -173,8 +201,8 @@ export class WasmDecoder implements IVideoDecoder {
     const chromaHeight = height >> 1;
     const chromaStride = stride >> 1;
     
-    const timestamp = this.pendingTimestamps.shift() ?? 0;
-    
+    const timestamp = message.pts ?? 0;
+
     const frame: YUVFrame = {
       y: yBuffer,
       u: uBuffer,
@@ -184,6 +212,9 @@ export class WasmDecoder implements IVideoDecoder {
       chromaStride,
       chromaHeight,
       timestamp,
+      // The worker hands back one buffer laid out as Y|U|V with stride === width,
+      // which is exactly I420 - expose it so consumers can skip repacking.
+      data: buffer.subarray(0, lumaSize + 2 * chromaSize),
       close: () => {
         // No-op for YUV frames (they're just typed arrays)
       }
@@ -193,12 +224,11 @@ export class WasmDecoder implements IVideoDecoder {
   }
   
   /**
-   * Flush the decoder (clear pending frames)
+   * Flush the decoder - pictures already in flight are discarded on arrival
    */
   flush(): void {
     this._queueSize = 0;
-    this.pendingTimestamps = [];
-    this.pendingFrames = [];
+    this.flushSeq = this.seq;
   }
   
   /**
@@ -225,7 +255,79 @@ export class WasmDecoder implements IVideoDecoder {
     }
     this.configured = false;
     this._queueSize = 0;
-    this.pendingTimestamps = [];
-    this.pendingFrames = [];
+    this.seq = 0;
+    this.flushSeq = 0;
   }
+}
+
+/**
+ * Walk the NAL units of an Annex B byte stream, keeping each start code prefix.
+ *
+ * Calls `visit` with a view per NAL - the views alias `stream` and are only valid
+ * for the duration of the callback.
+ */
+export function forEachNAL(stream: Uint8Array, visit: (nal: Uint8Array) => void): void {
+  const length = stream.byteLength;
+  let start = findStartCode(stream, 0);
+
+  if (start < 0) {
+    // Not Annex B - hand the buffer over unchanged
+    if (length > 0) {
+      visit(stream);
+    }
+    return;
+  }
+
+  while (start < length) {
+    const next = findStartCode(stream, start + 3);
+    const end = next < 0 ? length : next;
+    if (end > start) {
+      visit(stream.subarray(start, end));
+    }
+    if (next < 0) {
+      return;
+    }
+    start = next;
+  }
+}
+
+/**
+ * Whether a NAL is a coded slice, i.e. the decoder should emit a picture for it.
+ * NAL types 1 (non-IDR slice) and 5 (IDR slice) carry picture data.
+ */
+export function carriesPicture(nal: Uint8Array): boolean {
+  const prefix = startCodeLength(nal);
+  if (prefix === 0) {
+    // Framing is not Annex B - assume the buffer carries a picture
+    return true;
+  }
+  const nalType = nal[prefix] & 0x1f;
+  return nalType === 1 || nalType === 5;
+}
+
+/** Length of the Annex B start code at the head of `nal` (0 if there is none) */
+function startCodeLength(nal: Uint8Array): number {
+  if (nal.byteLength >= 4 && nal[0] === 0 && nal[1] === 0 && nal[2] === 0 && nal[3] === 1) {
+    return 4;
+  }
+  if (nal.byteLength >= 3 && nal[0] === 0 && nal[1] === 0 && nal[2] === 1) {
+    return 3;
+  }
+  return 0;
+}
+
+/** Index of the next 3- or 4-byte Annex B start code at or after `from`, or -1 */
+function findStartCode(stream: Uint8Array, from: number): number {
+  const limit = stream.byteLength - 3;
+  for (let i = Math.max(0, from); i <= limit; i++) {
+    if (stream[i] === 0 && stream[i + 1] === 0) {
+      if (stream[i + 2] === 1) {
+        return i;
+      }
+      if (stream[i + 2] === 0 && stream[i + 3] === 1) {
+        return i;
+      }
+    }
+  }
+  return -1;
 }
