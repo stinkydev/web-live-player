@@ -132,6 +132,9 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private ownsAudioContext: boolean = false;
   private audioCodecData: IMediaCodecData | null = null;
   private volume: number = 1;
+  private audioInitializing: boolean = false;
+  private pendingAudioDuringInit: ParsedFrame[] = [];
+  private static readonly MAX_PENDING_AUDIO = 32;
   
   // Timing tracking: fixed ring of recent packets, keyed by frame timestamp.
   // Parallel typed arrays so recording a packet allocates nothing.
@@ -606,7 +609,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         return;
       }
 
-      void this.reconfigureAndReplay(event, data, data.header.media?.codecData);
+      void this.reconfigureAndReplay(event, data, data.header.media.codecData);
       return; // The keyframe is replayed once the decoder is ready
     }
 
@@ -689,9 +692,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.isConfiguring = true;
     this.pendingDuringConfig = [keyframeData]; // Queue the keyframe itself
 
-    await this.configureDecoder(codecData);
+    try {
+      await this.configureDecoder(codecData);
+    } finally {
+      // Always clear the flag, otherwise every later frame would be queued
+      this.isConfiguring = false;
+    }
 
-    this.isConfiguring = false;
     this.waitingForKeyframe = true;
 
     // Process all queued frames now that decoder is ready
@@ -773,7 +780,19 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       return;
     }
 
-    // Decode the audio frame
+    // Queue frames that arrive while the audio player is initializing
+    if (this.audioInitializing) {
+      if (this.pendingAudioDuringInit.length < LiveVideoPlayer.MAX_PENDING_AUDIO) {
+        this.pendingAudioDuringInit.push(data);
+      }
+      return;
+    }
+
+    this.decodeAudioFrame(data);
+  }
+
+  /** Hand an audio frame to the audio player */
+  private decodeAudioFrame(data: ParsedFrame): void {
     if (this.audioPlayer && data.payload && data.header) {
       // Pass PTS directly as bigint (microseconds)
       this.audioPlayer.decode(data.payload, data.header.media?.pts);
@@ -782,11 +801,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
 
   /**
    * Create and initialize the audio player for new codec data, then decode the
-   * frame that carried it.
+   * frame that carried it along with anything that arrived while initializing.
    */
   private async initAudioPlayer(codecData: IMediaCodecData, firstFrame: ParsedFrame): Promise<void> {
     // Set before awaiting so frames arriving during init don't trigger a second init
     this.audioCodecData = codecData;
+    this.audioInitializing = true;
+    this.pendingAudioDuringInit = [firstFrame];
 
     // Dispose old player if exists
     if (this.audioPlayer) {
@@ -811,19 +832,35 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     });
     this.audioPlayer = player;
 
-    // Initialize with codec data
-    await player.init(codecData);
+    try {
+      // Initialize with codec data
+      await player.init(codecData);
 
-    // Re-apply the caller's desired volume to the fresh audio player
-    player.setVolume(this.volume);
+      // Re-apply the caller's desired volume to the fresh audio player
+      player.setVolume(this.volume);
 
-    // Start playback
-    player.start();
-    this.logger.info(`Audio player started: ${codecData.codecType}, ${codecData.sampleRate}Hz, ${codecData.channels}ch`);
+      // Start playback
+      player.start();
+      this.logger.info(`Audio player started: ${codecData.codecType}, ${codecData.sampleRate}Hz, ${codecData.channels}ch`);
+    } catch (error) {
+      this.logger.error(`Failed to start audio player: ${error}`);
+      if (this.audioPlayer === player) {
+        player.dispose();
+        this.audioPlayer = null;
+      }
+      this.audioCodecData = null;
+      return;
+    } finally {
+      this.audioInitializing = false;
+      const pending = this.pendingAudioDuringInit;
+      this.pendingAudioDuringInit = [];
 
-    // Decode the frame that carried the new codec data
-    if (this.audioPlayer === player && firstFrame.payload && firstFrame.header) {
-      player.decode(firstFrame.payload, firstFrame.header.media?.pts);
+      // Drain the frames buffered during init, oldest first
+      if (this.audioPlayer === player) {
+        for (const pendingFrame of pending) {
+          this.decodeAudioFrame(pendingFrame);
+        }
+      }
     }
   }
   
@@ -1060,6 +1097,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.audioPlayer.dispose();
       this.audioPlayer = null;
     }
+    this.audioInitializing = false;
+    this.pendingAudioDuringInit = [];
     
     // Close audio context if we own it
     if (this.ownsAudioContext && this.audioContext) {

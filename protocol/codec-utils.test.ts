@@ -48,6 +48,12 @@ describe('rescaleTime', () => {
     expect(rescaleTime(pts, source, MICROSECOND_TIMEBASE)).toBe(rescaleExact(pts, source, MICROSECOND_TIMEBASE));
   });
 
+  it('falls back to BigInt math for number inputs beyond safe integers', () => {
+    const source = { num: 1, den: 90_000 };
+    const pts = 9007199254740994; // 2^53 + 2
+    expect(rescaleTime(pts, source, MICROSECOND_TIMEBASE)).toBe(rescaleExact(pts, source, MICROSECOND_TIMEBASE));
+  });
+
   it('truncates toward zero like BigInt division', () => {
     // 7 ticks at 1/3s = 2.333...s -> 2333333us
     expect(rescaleTime(7, { num: 1, den: 3 }, MICROSECOND_TIMEBASE)).toBe(2_333_333);

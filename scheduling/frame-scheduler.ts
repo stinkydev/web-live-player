@@ -489,7 +489,7 @@ export class FrameScheduler<T> {
 
   /** Correct timing drift by adjusting start point */
   private correctDrift(): void {
-    if (this.bufferSizeCount < 10 || !this.startStreamTimeUs) {
+    if (this.bufferSizeCount < 10 || this.startStreamTimeUs === null) {
       return;
     }
 

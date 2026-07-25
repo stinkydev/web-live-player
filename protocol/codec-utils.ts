@@ -41,7 +41,8 @@ function toBigInt(value: PtsValue): bigint {
 function toSafeNumber(value: PtsValue): number | null {
   if (value === null || value === undefined) return 0;
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? Math.floor(value) : null;
+    const floored = Math.floor(value);
+    return Number.isSafeInteger(floored) ? floored : null;
   }
   if (typeof value === 'bigint') {
     return value <= 9007199254740991n && value >= -9007199254740991n ? Number(value) : null;
