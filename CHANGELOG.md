@@ -86,6 +86,23 @@ These are visible to integrators - check them before upgrading.
 - `FileVideoPlayer` could emit non-`Error` values on `'error'`, and `dispose()` left
   a pending `waitForBuffer()` promise unresolved across reloads.
 - `FrameScheduler` skipped drift correction when the sync point was exactly 0.
+- `FrameScheduler` constructed with `maxBufferSize: 0` (or negative) span forever in
+  `enqueue()` - the overflow loop could never drain a zero-capacity buffer. The size
+  is now floored at 1.
+- Audio initialization could wedge permanently: `new AudioContext()` and the
+  `LiveAudioPlayer` constructor ran outside the try block, so a failure there (the
+  browser's context limit, or a closed context) left `audioInitializing` stuck true -
+  queueing every later audio frame - and surfaced as an unhandled rejection.
+- The MoQ capture sink left its session listeners attached on `disconnect()` when the
+  session was injected, so a later `'stateChange'` could flip the sink back to
+  connected and resume publishing after the caller disconnected.
+- Decoder reconfiguration and audio initialization are fired without awaiting; both
+  now attach a `.catch()`, so a throw during decoder construction (which happens
+  outside `configureDecoder`'s own try) reports an error and resets the pipeline flags
+  instead of becoming an unhandled rejection.
+- The packet timing ring is cleared on codec reconfiguration, so a frame decoded after
+  a PTS reset can't be matched against a stale entry and reported with the wrong
+  arrival time.
 - `WebSocketSource` cleanup and MoQ dependency updates from earlier work are
   unaffected; `rescaleTime`'s fast path now rejects non-safe integers so it can only
   return exact results.

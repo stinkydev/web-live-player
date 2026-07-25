@@ -171,7 +171,8 @@ export class FrameScheduler<T> {
     this.bufferDelayMs = config.bufferDelayMs ?? 100; // Default 100ms buffer
     // Auto-calculate maxBufferSize: at least 2x the buffer delay worth of frames at 60fps, min 30 frames
     const minFramesForBuffer = Math.ceil((this.bufferDelayMs / 1000) * 60 * 2);
-    this.maxBufferSize = config.maxBufferSize ?? Math.max(30, minFramesForBuffer);
+    // At least 1: a size of 0 would make the overflow loop in enqueue() spin forever
+    this.maxBufferSize = Math.max(1, config.maxBufferSize ?? Math.max(30, minFramesForBuffer));
     this.driftCheckInterval = config.driftCheckInterval ?? 150;
     this.driftThresholdMs = config.driftCorrectionThresholdMs ?? 30; // Default 30ms threshold
     this.logger = config.logger ?? (() => {});

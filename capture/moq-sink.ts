@@ -154,9 +154,12 @@ export class MoQCaptureSink extends BaseCaptureSink {
 
   async disconnect(): Promise<void> {
     if (this.session) {
+      // Detach either way: a session that keeps calling back into a disconnected
+      // sink would flip _connected via 'stateChange' and keep it alive
+      this.removeEventListeners();
+
       // Only dispose if we own the session
       if (this.sessionOwned) {
-        this.removeEventListeners();
         this.session.dispose();
         this.session = null;
       }

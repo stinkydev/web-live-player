@@ -648,7 +648,15 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         return;
       }
 
-      void this.reconfigureAndReplay(event, data, data.header.media.codecData);
+      // Decoder construction happens outside configureDecoder's own try, so this can
+      // reject - handle it here rather than as an unhandled rejection
+      this.reconfigureAndReplay(event, data, data.header.media.codecData)
+        .catch((error) => {
+          this.isConfiguring = false;
+          this.pendingDuringConfig = [];
+          this.logger.error(`Decoder reconfiguration failed: ${error}`);
+          this.emit1('error', error instanceof Error ? error : new Error(String(error)));
+        });
       return; // The keyframe is replayed once the decoder is ready
     }
 
@@ -730,6 +738,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.currentTimebase = timebaseFromCodecData(codecData);
     this.isConfiguring = true;
     this.pendingDuringConfig = [keyframeData]; // Queue the keyframe itself
+
+    // Stream timestamps often restart across a codec change, so drop the timing
+    // history rather than risk matching a new frame against a stale entry
+    this.timingWrite = 0;
+    this.timingCount = 0;
 
     try {
       await this.configureDecoder(codecData);
@@ -815,7 +828,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     // Check for codec changes
     const codecData = data.header?.media?.codecData;
     if (codecData && codecDataChanged(this.audioCodecData ?? undefined, codecData)) {
-      void this.initAudioPlayer(codecData, data);
+      // initAudioPlayer handles its own failures, but guard the promise so an
+      // unexpected throw can't surface as an unhandled rejection
+      this.initAudioPlayer(codecData, data)
+        .catch((error) => {
+          this.audioInitializing = false;
+          this.pendingAudioDuringInit = [];
+          this.logger.error(`Audio initialization failed: ${error}`);
+        });
       return;
     }
 
@@ -860,24 +880,29 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.audioPlayer = null;
     }
 
-    // Create audio context if needed
-    if (!this.audioContext) {
-      if (this.config.audioContext) {
-        this.audioContext = this.config.audioContext;
-        this.ownsAudioContext = false;
-      } else {
-        this.audioContext = new AudioContext();
-        this.ownsAudioContext = true;
-      }
-    }
-
-    // Create audio player with buffer delay config
-    const player = new LiveAudioPlayer(this.audioContext, {
-      bufferDelayMs: this.config.bufferDelayMs ?? 100
-    });
-    this.audioPlayer = player;
+    // Everything below can throw - creating an AudioContext fails once the browser's
+    // context limit is reached, and the player constructor fails on a closed context -
+    // so it all runs under the try that clears the initializing flag
+    let player: LiveAudioPlayer | null = null;
 
     try {
+      // Create audio context if needed
+      if (!this.audioContext) {
+        if (this.config.audioContext) {
+          this.audioContext = this.config.audioContext;
+          this.ownsAudioContext = false;
+        } else {
+          this.audioContext = new AudioContext();
+          this.ownsAudioContext = true;
+        }
+      }
+
+      // Create audio player with buffer delay config
+      player = new LiveAudioPlayer(this.audioContext, {
+        bufferDelayMs: this.config.bufferDelayMs ?? 100
+      });
+      this.audioPlayer = player;
+
       // Initialize with codec data
       await player.init(codecData);
 
@@ -889,20 +914,23 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.logger.info(`Audio player started: ${codecData.codecType}, ${codecData.sampleRate}Hz, ${codecData.channels}ch`);
     } catch (error) {
       this.logger.error(`Failed to start audio player: ${error}`);
-      if (this.audioPlayer === player) {
+      if (player && this.audioPlayer === player) {
         player.dispose();
         this.audioPlayer = null;
       }
+      player = null;
+
+      // Forget the codec data so the next packet retries instead of assuming
+      // audio is already configured
       this.audioCodecData = null;
       this.audioTimebase = MICROSECOND_TIMEBASE;
-      return;
     } finally {
       this.audioInitializing = false;
       const pending = this.pendingAudioDuringInit;
       this.pendingAudioDuringInit = [];
 
       // Drain the frames buffered during init, oldest first
-      if (this.audioPlayer === player) {
+      if (player && this.audioPlayer === player) {
         for (const pendingFrame of pending) {
           this.decodeAudioFrame(pendingFrame);
         }

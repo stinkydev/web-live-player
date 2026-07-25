@@ -302,6 +302,29 @@ describe('FrameScheduler', () => {
     });
   });
   
+  describe('Degenerate Configuration', () => {
+    it('should not spin when maxBufferSize is 0', () => {
+      const degenerate = new FrameScheduler<MockFrame>({
+        bufferDelayMs: 100,
+        maxBufferSize: 0,
+        onFrameDropped: (frame) => { frame.closed = true; },
+      });
+
+      // Without a floor of 1, enqueue()'s overflow loop never terminates
+      degenerate.enqueue(createMockFrame(1), 0, createTiming());
+      degenerate.enqueue(createMockFrame(2), 20000, createTiming());
+
+      expect(degenerate.getStatus().currentBufferSize).toBe(1);
+      expect(degenerate.getStatus().totalEnqueuedFrames).toBe(2);
+    });
+
+    it('should not spin when maxBufferSize is negative', () => {
+      const degenerate = new FrameScheduler<MockFrame>({ maxBufferSize: -5 });
+      degenerate.enqueue(createMockFrame(1), 0, createTiming());
+      expect(degenerate.getStatus().currentBufferSize).toBe(1);
+    });
+  });
+
   describe('Ring Buffer Reuse', () => {
     it('should keep returning frames in order as the ring wraps', () => {
       const t0 = 1_000_000; // arbitrary fixed clock in ms
