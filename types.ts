@@ -14,6 +14,13 @@ export interface YUVFrame {
   chromaStride: number;
   chromaHeight: number;
   timestamp: number;
+  /**
+   * The backing buffer the y/u/v views point into, when all three planes are
+   * contiguous in I420 order (Y, then U, then V). Consumers can hand this
+   * straight to `new VideoFrame(..., { format: 'I420' })` instead of repacking
+   * the planes into a fresh allocation.
+   */
+  data?: Uint8Array;
   /** Compatibility with VideoFrame interface */
   close: () => void;
 }

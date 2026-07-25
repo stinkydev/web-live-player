@@ -92,6 +92,18 @@ export abstract class BasePlayer<TState extends string> {
   protected emit(event: string, ...args: any[]): void {
     this.eventHandlers.get(event)?.forEach(handler => handler(...args));
   }
+
+  /**
+   * Emit an event with a single argument.
+   * Avoids the rest-array and spread of {@link emit} on per-frame paths.
+   */
+  protected emit1(event: string, arg: any): void {
+    const handlers = this.eventHandlers.get(event);
+    if (handlers === undefined || handlers.size === 0) {
+      return;
+    }
+    handlers.forEach(handler => handler(arg));
+  }
   
   /**
    * Clear all event handlers (called during dispose)

@@ -50,8 +50,11 @@ export interface IVideoDecoder {
   /**
    * Decode a binary packet from the stream
    * @param data - Parsed stream data containing header and payload
+   * @param timestampUs - Optional pre-rescaled PTS in microseconds. Pass this when
+   *                      the caller has already converted the timestamp to avoid
+   *                      redoing the (per-frame) rescale inside the decoder.
    */
-  decodeBinary(data: ParsedFrame): void;
+  decodeBinary(data: ParsedFrame, timestampUs?: number): void;
   
   /**
    * Flush pending frames (synchronous reset)

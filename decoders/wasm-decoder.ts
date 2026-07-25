@@ -7,7 +7,7 @@
 
 // @ts-ignore - Worker import with inline for library bundling
 import H264Worker from './wasm-worker/H264NALDecoder.worker?worker&inline';
-import { rescaleTime } from '../protocol/codec-utils';
+import { rescaleTime, timebaseFromCodecData, MICROSECOND_TIMEBASE } from '../protocol/codec-utils';
 import type { YUVFrame } from '../types';
 import type { IVideoDecoder } from './decoder-interface';
 import { ParsedFrame } from '@stinkycomputing/sesame-api-client';
@@ -100,23 +100,25 @@ export class WasmDecoder implements IVideoDecoder {
   
   /**
    * Decode a binary packet (same interface as WebCodecsDecoder)
+   *
+   * @param timestampUs - Optional pre-rescaled PTS in microseconds (skips the rescale)
    */
-  decodeBinary(data: ParsedFrame): void {
+  decodeBinary(data: ParsedFrame, timestampUs?: number): void {
     if (!this.worker || !this.configured || !data.header || !data.payload) {
       return;
     }
-    
+
     // IMPORTANT: Create a NEW Uint8Array copy - the payload is a slice of a larger buffer
     // that would be detached if we transfer it directly
     const arr = new Uint8Array(data.payload);
-    
-    // Convert timestamp to microseconds
-    const sourceTimebase = data.header.media?.codecData?.timebaseDen && data.header.media?.codecData?.timebaseNum
-      ? { num: data.header.media.codecData.timebaseNum, den: data.header.media.codecData.timebaseDen }
-      : { num: 1, den: 1000000 };
-    const microsecondTimebase = { num: 1, den: 1000000 };
-    const pts = rescaleTime(data.header.media?.pts ?? 0, sourceTimebase, microsecondTimebase);
-    
+
+    // Convert timestamp to microseconds (unless the caller already did)
+    const pts = timestampUs ?? rescaleTime(
+      data.header.media?.pts ?? 0,
+      timebaseFromCodecData(data.header.media?.codecData),
+      MICROSECOND_TIMEBASE
+    );
+
     // Queue the frame (matching Elmo's working implementation)
     this.pendingFrames.push(arr);
     this.pendingTimestamps.push(pts);
@@ -174,7 +176,7 @@ export class WasmDecoder implements IVideoDecoder {
     const chromaStride = stride >> 1;
     
     const timestamp = this.pendingTimestamps.shift() ?? 0;
-    
+
     const frame: YUVFrame = {
       y: yBuffer,
       u: uBuffer,
@@ -184,6 +186,9 @@ export class WasmDecoder implements IVideoDecoder {
       chromaStride,
       chromaHeight,
       timestamp,
+      // The worker hands back one buffer laid out as Y|U|V with stride === width,
+      // which is exactly I420 - expose it so consumers can skip repacking.
+      data: buffer.subarray(0, lumaSize + 2 * chromaSize),
       close: () => {
         // No-op for YUV frames (they're just typed arrays)
       }

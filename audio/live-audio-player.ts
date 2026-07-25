@@ -140,10 +140,8 @@ class LiveAudioProcessor extends AudioWorkletProcessor {
       if (!this.currentBuffer || this.readIndex >= this.currentBuffer.left.length) {
         if (this.buffers.length === 0) {
           // No more audio - fill with silence
-          for (let i = outputIndex; i < leftChannel.length; i++) {
-            leftChannel[i] = 0;
-            rightChannel[i] = 0;
-          }
+          leftChannel.fill(0, outputIndex);
+          rightChannel.fill(0, outputIndex);
           return true;
         }
         
@@ -154,12 +152,11 @@ class LiveAudioProcessor extends AudioWorkletProcessor {
       // Copy samples
       const samplesRemaining = this.currentBuffer.left.length - this.readIndex;
       const samplesToCopy = Math.min(samplesRemaining, leftChannel.length - outputIndex);
-      
-      for (let i = 0; i < samplesToCopy; i++) {
-        leftChannel[outputIndex + i] = this.currentBuffer.left[this.readIndex + i];
-        rightChannel[outputIndex + i] = this.currentBuffer.right[this.readIndex + i];
-      }
-      
+      const readEnd = this.readIndex + samplesToCopy;
+
+      leftChannel.set(this.currentBuffer.left.subarray(this.readIndex, readEnd), outputIndex);
+      rightChannel.set(this.currentBuffer.right.subarray(this.readIndex, readEnd), outputIndex);
+
       outputIndex += samplesToCopy;
       this.readIndex += samplesToCopy;
     }
@@ -186,6 +183,11 @@ export class LiveAudioPlayer {
   // Timing for live streams
   private startTime: number = 0;
   private bufferDelayMs: number;
+
+  // Decoded-frame layout, resolved from the first frame the decoder emits
+  private numPlanes: number | null = null;
+  // Reused staging buffer for de-interleaving
+  private interleavedScratch: Float32Array | null = null;
   
   constructor(context: AudioContext, config: LiveAudioConfig = {}) {
     this.ctx = context;
@@ -203,6 +205,9 @@ export class LiveAudioPlayer {
       throw new Error('AudioWorklet not supported - need localhost or HTTPS');
     }
     
+    this.numPlanes = null;
+    this.interleavedScratch = null;
+
     // Build decoder config based on codec type
     const decoderConfig = this.buildDecoderConfig(codecData);
     
@@ -303,66 +308,51 @@ export class LiveAudioPlayer {
     
     try {
       const samplesPerChannel = frame.numberOfFrames;
-      
-      // Detect planar vs interleaved
-      let numPlanes = 1;
-      try {
-        if (frame.numberOfChannels > 1) {
-          frame.allocationSize({ planeIndex: 1, frameOffset: 0, frameCount: 1 });
-          numPlanes = frame.numberOfChannels;
-        }
-      } catch {
-        numPlanes = 1;
-      }
-      
+      const numPlanes = this.getNumPlanes(frame);
+
+      // These buffers are transferred to the worklet, so they can't be pooled
       const leftChannelData = new Float32Array(samplesPerChannel);
       const rightChannelData = new Float32Array(samplesPerChannel);
-      
+
       if (numPlanes === 1) {
         // Interleaved audio
-        const allocationSize = frame.allocationSize({
-          planeIndex: 0,
-          frameOffset: 0,
-          frameCount: frame.numberOfFrames
-        });
-        
-        const interleavedBuffer = new ArrayBuffer(allocationSize);
-        frame.copyTo(interleavedBuffer, {
-          planeIndex: 0,
-          frameOffset: 0,
-          frameCount: frame.numberOfFrames
-        });
-        
-        const interleavedView = new Float32Array(interleavedBuffer);
-        
         if (frame.numberOfChannels === 1) {
-          leftChannelData.set(interleavedView);
-          rightChannelData.set(interleavedView);
+          frame.copyTo(leftChannelData, {
+            planeIndex: 0,
+            frameOffset: 0,
+            frameCount: samplesPerChannel
+          });
+          rightChannelData.set(leftChannelData);
         } else {
+          const allocationSize = frame.allocationSize({
+            planeIndex: 0,
+            frameOffset: 0,
+            frameCount: samplesPerChannel
+          });
+
+          const interleaved = this.getInterleavedScratch(allocationSize);
+          frame.copyTo(interleaved, {
+            planeIndex: 0,
+            frameOffset: 0,
+            frameCount: samplesPerChannel
+          });
+
           for (let i = 0; i < samplesPerChannel; i++) {
-            leftChannelData[i] = interleavedView[i * 2];
-            rightChannelData[i] = interleavedView[i * 2 + 1];
+            leftChannelData[i] = interleaved[i * 2];
+            rightChannelData[i] = interleaved[i * 2 + 1];
           }
         }
       } else {
-        // Planar audio
-        const leftBuffer = new ArrayBuffer(frame.allocationSize({
-          planeIndex: 0, frameOffset: 0, frameCount: frame.numberOfFrames
-        }));
-        frame.copyTo(leftBuffer, { planeIndex: 0, frameOffset: 0, frameCount: frame.numberOfFrames });
-        leftChannelData.set(new Float32Array(leftBuffer));
-        
+        // Planar audio - copy straight into the channel buffers
+        frame.copyTo(leftChannelData, { planeIndex: 0, frameOffset: 0, frameCount: samplesPerChannel });
+
         if (frame.numberOfChannels > 1) {
-          const rightBuffer = new ArrayBuffer(frame.allocationSize({
-            planeIndex: 1, frameOffset: 0, frameCount: frame.numberOfFrames
-          }));
-          frame.copyTo(rightBuffer, { planeIndex: 1, frameOffset: 0, frameCount: frame.numberOfFrames });
-          rightChannelData.set(new Float32Array(rightBuffer));
+          frame.copyTo(rightChannelData, { planeIndex: 1, frameOffset: 0, frameCount: samplesPerChannel });
         } else {
           rightChannelData.set(leftChannelData);
         }
       }
-      
+
       // Resample if needed
       const resampledLeft = this.resampleAudio(leftChannelData, frame.sampleRate, this.targetSampleRate);
       const resampledRight = this.resampleAudio(rightChannelData, frame.sampleRate, this.targetSampleRate);
@@ -386,6 +376,42 @@ export class LiveAudioPlayer {
     }
   }
   
+  /**
+   * Resolve whether decoded frames are planar or interleaved.
+   *
+   * The probe throws for interleaved formats, so the result is cached for the
+   * lifetime of the decoder configuration.
+   */
+  private getNumPlanes(frame: AudioData): number {
+    if (this.numPlanes !== null) {
+      return this.numPlanes;
+    }
+
+    let numPlanes = 1;
+    try {
+      if (frame.numberOfChannels > 1) {
+        frame.allocationSize({ planeIndex: 1, frameOffset: 0, frameCount: 1 });
+        numPlanes = frame.numberOfChannels;
+      }
+    } catch {
+      numPlanes = 1;
+    }
+
+    this.numPlanes = numPlanes;
+    return numPlanes;
+  }
+
+  /** Get a reusable de-interleaving buffer of at least `byteLength` bytes */
+  private getInterleavedScratch(byteLength: number): Float32Array {
+    const samples = byteLength >> 2;
+    if (!this.interleavedScratch || this.interleavedScratch.length < samples) {
+      this.interleavedScratch = new Float32Array(samples);
+    }
+    return this.interleavedScratch.length === samples
+      ? this.interleavedScratch
+      : this.interleavedScratch.subarray(0, samples);
+  }
+
   /**
    * Resample audio to target sample rate
    */
@@ -499,7 +525,9 @@ export class LiveAudioPlayer {
    */
   dispose(): void {
     this.initialized = false;
-    
+    this.numPlanes = null;
+    this.interleavedScratch = null;
+
     if (this.decoder) {
       try {
         if (this.decoder.state === 'configured') {
