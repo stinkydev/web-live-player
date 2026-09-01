@@ -5,6 +5,8 @@
  * and AudioWorklet for real-time playback.
  */
 
+import { registerWorklet } from "./worklet-registry";
+
 // Worklet URL will be resolved by Vite
 const WORKLET_CODE = `
 class AudioPlayProcessor extends AudioWorkletProcessor {
@@ -153,16 +155,9 @@ export class FileAudioPlayer {
     
     this.decoder.configure(this.codecConfig);
     
-    // Load worklet from inline code using Blob URL
-    const workletBlob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
-    const workletUrl = URL.createObjectURL(workletBlob);
-    
-    try {
-      await this.ctx.audioWorklet.addModule(workletUrl);
-    } finally {
-      URL.revokeObjectURL(workletUrl);
-    }
-    
+    // Load worklet (once per AudioContext)
+    await registerWorklet(this.ctx, 'audio-play-processor', WORKLET_CODE);
+
     this.workletNode = new AudioWorkletNode(this.ctx, 'audio-play-processor', {
       numberOfInputs: 0,
       numberOfOutputs: 1,

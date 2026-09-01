@@ -6,6 +6,7 @@
  */
 
 import { CodecType, IMediaCodecData } from "@stinkycomputing/sesame-api-client";
+import { registerWorklet } from "./worklet-registry";
 
 /**
  * Check if value is a Long object (duck-typing to avoid importing 'long' module)
@@ -227,16 +228,9 @@ export class LiveAudioPlayer {
     
     this.decoder.configure(decoderConfig);
     
-    // Load worklet
-    const workletBlob = new Blob([LIVE_WORKLET_CODE], { type: 'application/javascript' });
-    const workletUrl = URL.createObjectURL(workletBlob);
-    
-    try {
-      await this.ctx.audioWorklet.addModule(workletUrl);
-    } finally {
-      URL.revokeObjectURL(workletUrl);
-    }
-    
+    // Load worklet (once per AudioContext)
+    await registerWorklet(this.ctx, 'live-audio-processor', LIVE_WORKLET_CODE);
+
     this.workletNode = new AudioWorkletNode(this.ctx, 'live-audio-processor', {
       numberOfInputs: 0,
       numberOfOutputs: 1,
