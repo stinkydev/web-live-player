@@ -8,6 +8,14 @@ All notable changes to this project are documented here.
 
 These are visible to integrators - check them before upgrading.
 
+- **The Sesame client dependency is a range** (`>=1.9.0-alpha.1 <2`) instead of an
+  exact pin, so the player shares the host application's copy. 1.9 parses frame side
+  data (`MediaFrameData.side_data`), which the WebSocket source now passes through in
+  the parsed frame header. No API change.
+- **The Sesame client dependency is a range** (`>=1.9.0-alpha.1 <2`) instead of an
+  exact pin, so the player shares the host application's copy. 1.9 parses frame side
+  data (`MediaFrameData.side_data`), which the WebSocket source now passes through in
+  the parsed frame header. No API change.
 - **Frame ownership is now explicit.** Frames from `getVideoFrame()` are owned by the
   player and closed when the next frame is due; frames delivered by the `'frame'`
   event are only valid for the duration of the handler. The documentation previously
