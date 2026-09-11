@@ -14,7 +14,8 @@ All notable changes to this project are documented here.
   stride; a delta frame that finds the queue full is dropped while the queued frames keep
   showing, and a keyframe that finds it full restarts the decoder from that frame at once.
   Frames that arrived while the decoder was configuring are replayed from the newest
-  keyframe among them rather than all of them.
+  keyframe among them rather than all of them, and only the newest of them is shown: the
+  first picture is the live edge, not a fast-forward through the group.
 
 ### Changed
 

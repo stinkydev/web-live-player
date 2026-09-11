@@ -131,6 +131,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private statusLogCounter: number = 0;
   private isConfiguring: boolean = false;
   private pendingDuringConfig: ParsedFrame[] = [];  // Queue frames during configuration
+  // While the decoder works through what arrived before it was ready, frames older than the
+  // newest of them are decoded (the chain needs them) but not shown: the first picture on
+  // screen is the live edge, not a fast-forward of the group.
+  private showFromUs: number = -1;
   
   // Frame scheduling
   private frameScheduler: FrameScheduler<VideoFrame>;
@@ -500,6 +504,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   flush(): void {
     this.logger.info('Flushing player pipeline');
     this.waitingForKeyframe = true;
+    this.showFromUs = -1;
     
     // Flush decoder
     this.decoder?.flushSync();
@@ -783,9 +788,19 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.pendingDuringConfig = [];
     const pending = framesFromLastKeyframe(queued);
     this.logger.info(`Processing ${pending.length} of ${queued.length} frames queued during configuration`);
+    const newest = pending[pending.length - 1]?.header?.media;
+    this.showFromUs = pending.length > 1 && newest ? rescaleTime(newest.pts ?? 0, this.currentTimebase, MICROSECOND_TIMEBASE) : -1;
     for (const pendingData of pending) {
       this.decodeVideoFrame(pendingData);
     }
+  }
+
+  /** Whether a decoded frame is older than the live edge the player is catching up to. */
+  private behindLiveEdge(timestampUs: number): boolean {
+    if (this.showFromUs < 0) return false;
+    if (timestampUs < this.showFromUs) return true;
+    this.showFromUs = -1;
+    return false;
   }
 
   /** Record a packet's arrival time and keyframe flag in the timing ring */
@@ -1036,6 +1051,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * Handle decoded video frame (from WebCodecs)
    */
   private handleDecodedFrame(frame: VideoFrame): void {
+    if (this.behindLiveEdge(frame.timestamp)) {
+      frame.close();
+      return;
+    }
     const decodeTime = performance.now();
     const i = this.findPacketTiming(frame.timestamp);
     const arrivalTime = i >= 0 ? this.timingArrivals[i] : decodeTime;
@@ -1050,6 +1069,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * Converts YUV to VideoFrame using canvas
    */
   private handleDecodedYUVFrame(yuvFrame: YUVFrame): void {
+    if (this.behindLiveEdge(yuvFrame.timestamp)) return;
     const decodeTime = performance.now();
     const i = this.findPacketTiming(yuvFrame.timestamp);
     const arrivalTime = i >= 0 ? this.timingArrivals[i] : decodeTime;
@@ -1233,6 +1253,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.currentCodecData = undefined;
     this.currentTimebase = MICROSECOND_TIMEBASE;
     this.waitingForKeyframe = true;
+    this.showFromUs = -1;
     this.totalDrops = 0;
     this.consecutiveDrops = 0;
     
