@@ -6,6 +6,11 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **A slow decoder start no longer trips the queue guard.** Until a decoder has produced
+  its first frame it is initialising, so a full queue is accepted rather than dropped or
+  restarted (a restart would only begin the initialisation again), and the limit is now
+  ten seconds of frames.
+
 - **A full decoder queue no longer blacks out playback.** The live player used to
   reset the decoder when its queue passed 10 chunks and then wait for the next keyframe,
   so the group a relay hands a new subscriber up front, or a busy main thread delaying the

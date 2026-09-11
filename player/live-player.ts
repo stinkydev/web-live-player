@@ -18,12 +18,12 @@ import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputin
  * Player configuration
  */
 /**
- * Chunks the decoder may hold before a delta frame is dropped: five seconds at 50 fps. A
+ * Chunks the decoder may hold before a delta frame is dropped: ten seconds at 50 fps. A
  * subscription starts with the current group from its first frame, up to a whole GOP at
  * once, and a decoder takes that in its stride; the limit only guards against a decoder
- * that cannot keep up at all.
+ * that cannot keep up at all. Encoded chunks are small, so the queue costs little.
  */
-const MAX_DECODE_QUEUE = 256;
+const MAX_DECODE_QUEUE = 512;
 
 /** The frames from the last keyframe on; all of them when none is a keyframe. */
 export function framesFromLastKeyframe(frames: ParsedFrame[]): ParsedFrame[] {

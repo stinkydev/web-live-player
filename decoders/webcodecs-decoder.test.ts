@@ -35,6 +35,7 @@ describe('WebCodecsDecoder back-pressure', () => {
     inner = FakeVideoDecoder.instances[0];
     (decoder as any).config = { codec: 'avc1.42001f' };
     inner.configure((decoder as any).config);
+    (decoder as any).outputSinceConfigure = true;
   });
 
   it('decodes while the queue is within the limit', () => {
@@ -50,6 +51,15 @@ describe('WebCodecsDecoder back-pressure', () => {
     expect(inner.decode).not.toHaveBeenCalled();
     expect(inner.reset).not.toHaveBeenCalled();
     expect(overflow).toHaveBeenCalledWith(5);
+  });
+
+  it('accepts anything while the decoder has not produced its first frame', () => {
+    inner.decodeQueueSize = 5;
+    (decoder as any).outputSinceConfigure = false;
+    decoder.decodeBinary(frame(false));
+    expect(inner.decode).toHaveBeenCalledOnce();
+    expect(inner.reset).not.toHaveBeenCalled();
+    expect(overflow).not.toHaveBeenCalled();
   });
 
   it('restarts from a keyframe that finds the queue full', () => {

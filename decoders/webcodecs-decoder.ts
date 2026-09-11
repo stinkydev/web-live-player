@@ -46,6 +46,9 @@ export class WebCodecsDecoder implements IVideoDecoder {
   // Statistics
   public chunksSentToDecoder = 0;
   public framesDecoded = 0;
+  // Whether a frame has come out since the decoder was last configured or reset: until
+  // then it is still initialising, and a growing queue says nothing about its speed.
+  private outputSinceConfigure = false;
   
   constructor(options: DecoderConfig = {}) {
     this.logger = options.logger ?? consoleLogger;
@@ -68,6 +71,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
     this.decoder = new VideoDecoder({
       output: (frame) => {
         this.framesDecoded++;
+        this.outputSinceConfigure = true;
         if (this.onFrameDecoded) {
           this.onFrameDecoded(frame);
         } else {
@@ -259,6 +263,11 @@ export class WebCodecsDecoder implements IVideoDecoder {
     if (!this.decoder || this.decoder.decodeQueueSize <= this.maxQueueSize) {
       return true;
     }
+    // still initialising: the queue drains once it starts, and a restart would only
+    // start the initialisation over
+    if (!this.outputSinceConfigure) {
+      return true;
+    }
     if (!isKeyframe) {
       this.onQueueOverflow?.(this.decoder.decodeQueueSize);
       return false;
@@ -297,6 +306,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       
       if (this.config) {
         this.decoder.configure(this.config);
+      this.outputSinceConfigure = false;
       }
     }
     this.flushing = false;
@@ -311,6 +321,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       
       if (this.config) {
         this.decoder.configure(this.config);
+      this.outputSinceConfigure = false;
       }
     }
   }
