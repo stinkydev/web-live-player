@@ -17,6 +17,22 @@ import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputin
 /**
  * Player configuration
  */
+/**
+ * Chunks the decoder may hold before a delta frame is dropped: five seconds at 50 fps. A
+ * subscription starts with the current group from its first frame, up to a whole GOP at
+ * once, and a decoder takes that in its stride; the limit only guards against a decoder
+ * that cannot keep up at all.
+ */
+const MAX_DECODE_QUEUE = 256;
+
+/** The frames from the last keyframe on; all of them when none is a keyframe. */
+export function framesFromLastKeyframe(frames: ParsedFrame[]): ParsedFrame[] {
+  for (let i = frames.length - 1; i >= 0; i--) {
+    if (frames[i].header?.media?.keyframe) return frames.slice(i);
+  }
+  return frames;
+}
+
 export interface PlayerConfig {
   preferredDecoder?: PreferredDecoder;
   /** Buffer delay in milliseconds (default: 100ms) */
@@ -109,6 +125,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private currentTimebase: Timebase = MICROSECOND_TIMEBASE;
   private useWasmDecoder: boolean = false;
   private waitingForKeyframe: boolean = true;
+  private lastOverflowLog: number = 0;
   private lastWaitingForKeyframeLog: number = 0;
   private lastKeyframeRequest: number = 0;
   private statusLogCounter: number = 0;
@@ -650,7 +667,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
 
       // Decoder construction happens outside configureDecoder's own try, so this can
       // reject - handle it here rather than as an unhandled rejection
-      this.reconfigureAndReplay(event, data, data.header.media.codecData)
+      this.reconfigureAndReplay(data, data.header.media.codecData)
         .catch((error) => {
           this.isConfiguring = false;
           this.pendingDuringConfig = [];
@@ -674,6 +691,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.logger.warn(`Dropping frame pts=${data.header.media?.pts}: decoder not ready (state=${this.decoder?.state ?? 'null'})`);
       return;
     }
+
+    this.decodeVideoFrame(data);
+  }
+
+  /** Decode one video frame: dropped while waiting for a keyframe, else timed and sent on. */
+  private decodeVideoFrame(data: ParsedFrame): void {
+    if (!this.decoder || !data.header?.media) return;
+    const isKeyframe = !!data.header.media.keyframe;
 
     // Wait for keyframe after configuration or flush
     if (this.waitingForKeyframe) {
@@ -730,7 +755,6 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * anything that arrived while configuring.
    */
   private async reconfigureAndReplay(
-    event: StreamDataEvent,
     keyframeData: ParsedFrame,
     codecData: IMediaCodecData
   ): Promise<void> {
@@ -753,16 +777,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
 
     this.waitingForKeyframe = true;
 
-    // Process all queued frames now that decoder is ready
-    const pending = this.pendingDuringConfig;
+    // Replay what arrived while configuring, from the newest keyframe: anything older
+    // would only be decoded to be dropped by the scheduler
+    const queued = this.pendingDuringConfig;
     this.pendingDuringConfig = [];
-    this.logger.info(`Processing ${pending.length} frames queued during configuration`);
+    const pending = framesFromLastKeyframe(queued);
+    this.logger.info(`Processing ${pending.length} of ${queued.length} frames queued during configuration`);
     for (const pendingData of pending) {
-      this.handleStreamData({
-        trackName: event.trackName,
-        streamType: event.streamType,
-        data: pendingData,
-      });
+      this.decodeVideoFrame(pendingData);
     }
   }
 
@@ -958,7 +980,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
           onFrameDecoded: (frame) => this.handleDecodedYUVFrame(frame),
           onError: (error) => this.handleDecoderError(error),
           onQueueOverflow: (queueSize) => this.handleQueueOverflow(queueSize),
-          maxQueueSize: 10,
+          maxQueueSize: MAX_DECODE_QUEUE,
         });
       } else {
         this.logger.info(`Using WebCodecs decoder (${this.config.preferredDecoder})`);
@@ -967,7 +989,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
           onFrameDecoded: (frame) => this.handleDecodedFrame(frame),
           onError: (error) => this.handleDecoderError(error),
           onQueueOverflow: (queueSize) => this.handleQueueOverflow(queueSize),
-          maxQueueSize: 10,
+          maxQueueSize: MAX_DECODE_QUEUE,
         });
       }
     }
@@ -1142,11 +1164,18 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   }
   
   /**
-   * Handle decoder queue overflow - flush and request keyframe
+   * The decoder dropped a delta frame because its queue is full. What is queued keeps
+   * decoding and showing; decoding resumes at the next keyframe, which the decoder
+   * accepts even with a full queue (it restarts from it). Resetting here would throw the
+   * queued frames away and black out until that keyframe for no gain.
    */
   private handleQueueOverflow(queueSize: number): void {
-    this.logger.warn(`Decoder queue overflow: ${queueSize} frames, flushing...`);
-    this.flush();
+    const now = Date.now();
+    if (!this.lastOverflowLog || now - this.lastOverflowLog > 1000) {
+      this.logger.warn(`Decoder queue full (${queueSize} frames), dropping until the next keyframe`);
+      this.lastOverflowLog = now;
+    }
+    this.waitingForKeyframe = true;
   }
   
   /**

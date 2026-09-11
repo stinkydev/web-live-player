@@ -190,11 +190,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       return;
     }
 
-    // Check for queue overflow
-    if (this.decoder.decodeQueueSize > this.maxQueueSize) {
-      if (this.onQueueOverflow) {
-        this.onQueueOverflow(this.decoder.decodeQueueSize);
-      }
+    if (!this.admit(!!data.header.media?.keyframe)) {
       return;
     }
 
@@ -232,11 +228,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       return;
     }
     
-    // Check for queue overflow
-    if (this.decoder.decodeQueueSize > this.maxQueueSize) {
-      if (this.onQueueOverflow) {
-        this.onQueueOverflow(this.decoder.decodeQueueSize);
-      }
+    if (!this.admit(sample.isKeyframe)) {
       return;
     }
     
@@ -255,6 +247,27 @@ export class WebCodecsDecoder implements IVideoDecoder {
     }
   }
   
+  /**
+   * Back-pressure. The queue grows when the decoder cannot keep up, or when its output
+   * is not being drained (a busy main thread delays the output callbacks). A delta frame
+   * that finds the queue full is dropped and reported, so the player waits for the next
+   * keyframe; the queued frames still decode and show. A keyframe that finds the queue
+   * full restarts the decoder on the spot: the backlog is thrown away and playback
+   * resumes from this frame instead of a group later.
+   */
+  private admit(isKeyframe: boolean): boolean {
+    if (!this.decoder || this.decoder.decodeQueueSize <= this.maxQueueSize) {
+      return true;
+    }
+    if (!isKeyframe) {
+      this.onQueueOverflow?.(this.decoder.decodeQueueSize);
+      return false;
+    }
+    this.logger.warn(`Decoder queue full (${this.decoder.decodeQueueSize} frames) at a keyframe, restarting from it`);
+    this.reset();
+    return this.decoder.state === 'configured';
+  }
+
   /**
    * Flush the decoder (async - waits for pending frames)
    */

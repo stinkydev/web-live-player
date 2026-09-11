@@ -59,6 +59,8 @@ export interface IVideoDecoder {
   /**
    * Flush pending frames (synchronous reset)
    */
+  /** Chunks submitted and not yet taken by the decoder. */
+  readonly decodeQueueSize: number;
   flush(): void;
   
   /**

@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- **A full decoder queue no longer blacks out playback.** The live player used to
+  reset the decoder when its queue passed 10 chunks and then wait for the next keyframe,
+  so the group a relay hands a new subscriber up front, or a busy main thread delaying the
+  decoder's output callbacks, turned into a freeze lasting a whole GOP, and on a loaded
+  page into a permanent one. The limit is now 256 chunks, which a decoder takes in its
+  stride; a delta frame that finds the queue full is dropped while the queued frames keep
+  showing, and a keyframe that finds it full restarts the decoder from that frame at once.
+  Frames that arrived while the decoder was configuring are replayed from the newest
+  keyframe among them rather than all of them.
+
 ### Changed
 
 These are visible to integrators - check them before upgrading.

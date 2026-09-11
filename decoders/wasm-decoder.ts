@@ -112,6 +112,10 @@ export class WasmDecoder implements IVideoDecoder {
    *
    * @param timestampUs - Optional pre-rescaled PTS in microseconds (skips the rescale)
    */
+  get decodeQueueSize(): number {
+    return this._queueSize;
+  }
+
   decodeBinary(data: ParsedFrame, timestampUs?: number): void {
     if (!this.worker || !this.configured || !data.header || !data.payload) {
       return;
