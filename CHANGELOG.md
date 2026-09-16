@@ -26,6 +26,15 @@ All notable changes to this project are documented here.
 
 These are visible to integrators - check them before upgrading.
 
+- **`stinky-moq-js` is now `^0.2.0`** (was pinned to 0.1.22). It depends on `@moq/net`, which
+  is installed alongside; nothing changes in the player's public API.
+- **`MoQSource` mirrors the session state across reconnects.** `stinky-moq-js` 0.2 reconnects
+  on its own with backoff, so the source now emits `'disconnected'` when the relay connection
+  drops and `'connected'` again once it is back, and `connected` reflects the live state. It
+  previously only reported the final disconnect. `connect()` resolves once the relay is
+  reached instead of rejecting on a failed first attempt, so a relay that is down shows as a
+  pending connection rather than an error.
+
 - **The Sesame client dependency is a range** (`>=1.9.0-alpha.1 <2`) instead of an
   exact pin, so the player shares the host application's copy. 1.9 parses frame side
   data (`MediaFrameData.side_data`), which the WebSocket source now passes through in

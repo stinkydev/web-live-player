@@ -7,7 +7,8 @@
 
 import { BaseStreamSource } from './stream-source';
 
-import type { MoQSessionConfig, SubscriptionConfig, MoqSessionSubscriber } from 'stinky-moq-js';
+import type { MoQSessionConfig, SubscriptionConfig, MoqSessionSubscriber, SessionStatus } from 'stinky-moq-js';
+import { SessionState } from 'stinky-moq-js';
 
 /**
  * Track configuration for MoQ source
@@ -83,22 +84,25 @@ export class MoQSource extends BaseStreamSource {
       }));
       
       this.session = new MoqSessionSubscriber(sessionConfig, subscriptions);
-      
+
       // Setup event listeners
       this.setupEventListeners();
-      
+
+      // Resolves once the relay is reached; the session keeps retrying on its own until
+      // then, and rejects only if disconnect() disposes it first. The state listener
+      // above emits 'connected'.
       await this.session.connect();
-      this._connected = true;
-      this.emit('connected');
-      
+
     } catch (error) {
       this._connected = false;
-      this.emit('error', error instanceof Error ? error : new Error(String(error)));
+      if (this.session) {
+        this.emit('error', error instanceof Error ? error : new Error(String(error)));
+      }
     } finally {
       this.connecting = false;
     }
   }
-  
+
   /**
    * Disconnect from the MoQ relay
    */
@@ -124,12 +128,13 @@ export class MoQSource extends BaseStreamSource {
       this.emit('error', error instanceof Error ? error : new Error(String(error)));
     });
     
-    // Listen for state changes
-    this.session.on('stateChange', (status: any) => {
-      if (status.state === 'disconnected') {
-        this._connected = false;
-        this.emit('disconnected');
-      }
+    // Mirror the session state. The session reconnects on its own, so a drop shows up as
+    // 'reconnecting' and a recovery as another 'connected'.
+    this.session.on('stateChange', (status: SessionStatus) => {
+      const connected = status.state === SessionState.CONNECTED;
+      if (connected === this._connected) return;
+      this._connected = connected;
+      this.emit(connected ? 'connected' : 'disconnected');
     });
   }
   
