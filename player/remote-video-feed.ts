@@ -39,6 +39,8 @@ export class RemoteVideoFeed implements IVideoFeed {
   public get streamWidth(): number { return this.client.trackStats(this.track)?.width ?? 0; }
   public get streamHeight(): number { return this.client.trackStats(this.track)?.height ?? 0; }
   public get frameRate(): number { return this.client.trackStats(this.track)?.frameRate ?? 30; }
+  /** Decoded frames the worker closed because the main thread had not taken the earlier ones. */
+  public get framesDropped(): number { return this.client.trackStats(this.track)?.framesDropped ?? 0; }
 
   public dispose(): void {
     this.unsubscribe();

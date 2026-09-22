@@ -89,7 +89,13 @@ export interface PipelinePort {
   onmessage: ((event: { data: unknown }) => void) | null;
 }
 
-/** Frames posted to the main thread and not yet acknowledged, per track, before the worker drops decoded frames. */
-export const IN_FLIGHT_LIMIT = 8;
+/**
+ * Frames posted to the main thread and not yet acknowledged, per track, before the worker
+ * closes new ones instead. A guard against a main thread that stopped taking frames, not
+ * against a slow one: it sits above the scheduler's own capacity, so a stall the buffer would
+ * have covered still costs nothing. While frames wait unclosed the decoder's output pool
+ * holds it back, so the guard rarely engages.
+ */
+export const IN_FLIGHT_LIMIT = 64;
 /** Frames the client takes between acknowledgements. */
 export const ACK_BATCH = 4;

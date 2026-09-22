@@ -484,7 +484,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       bufferMs: schedulerStatus.currentBufferMs,
       avgBufferMs: schedulerStatus.avgBufferMs,
       targetBufferMs: schedulerStatus.targetBufferMs,
-      droppedFrames: schedulerStatus.droppedFrames,
+      droppedFrames: schedulerStatus.droppedFrames + this.feed.framesDropped,
       totalFrames: schedulerStatus.totalEnqueuedFrames,
       decoderState: this.feed.decoderState,
       streamWidth: this.feed.streamWidth,

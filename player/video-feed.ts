@@ -67,6 +67,8 @@ export interface IVideoFeed {
   readonly streamWidth: number;
   readonly streamHeight: number;
   readonly frameRate: number;
+  /** Decoded frames lost before the scheduler saw them (a worker feed's window). */
+  readonly framesDropped: number;
   dispose(): void;
 }
 
@@ -130,6 +132,7 @@ export class VideoFeed implements IVideoFeed {
   public get streamHeight(): number { return this._streamHeight; }
   public get frameRate(): number { return this.estimatedFrameRate; }
   public get framesDecoded(): number { return this._framesDecoded; }
+  public get framesDropped(): number { return 0; }
   public get preferredDecoder(): PreferredDecoder { return this.preferred; }
 
   public setDebugLogging(enabled: boolean): void {

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## 0.1.30
+
+### Fixed
+
+- **A slow main thread no longer costs frames in worker mode.** The pipeline worker closed
+  decoded frames while eight earlier ones were still untaken by the main thread, a window of
+  160 ms at 50 fps, so a scene update or a garbage collection on the main thread discarded
+  the frames arriving during it, frames the scheduler's buffer would have shown. The window
+  is now 64 frames, above the scheduler's own capacity: it guards against a main thread that
+  stopped taking frames, and a stall the buffer covers costs nothing. Frames the worker does
+  close count in `getStats().droppedFrames`.
+
 ## 0.1.29
 
 ### Added
