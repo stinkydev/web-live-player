@@ -10,6 +10,7 @@ import {
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
+  PipelineClient,
 } from '../../index';
 
 // DOM Elements
@@ -54,6 +55,7 @@ const btnFullscreen = document.getElementById('btnFullscreen')!;
 const bufferDelayInput = document.getElementById('bufferDelay') as HTMLInputElement;
 const decoderPreferenceInput = document.getElementById('decoderPreference') as HTMLSelectElement;
 const debugLoggingInput = document.getElementById('debugLogging') as HTMLInputElement;
+const decodeInWorkerInput = document.getElementById('decodeInWorker') as HTMLInputElement;
 
 // MoQ inputs
 const moqRelayUrlInput = document.getElementById('moqRelayUrl') as HTMLInputElement;
@@ -101,6 +103,8 @@ tabs.forEach(tab => {
 let player: LiveVideoPlayer | null = null;
 let filePlayer: FileVideoPlayer | null = null;
 let currentSource: IStreamSource | null = null;
+// The pipeline worker, when the MoQ session and the decode run there
+let pipeline: PipelineClient | null = null;
 let animationFrameId: number | null = null;
 let isFileMode: boolean = false;
 
@@ -355,11 +359,12 @@ function clearTimingGraph() {
 }
 
 // Create player with current settings
-function createPlayerInstance(): LiveVideoPlayer {
+function createPlayerInstance(pipelineConfig?: { client: PipelineClient; trackName: string }): LiveVideoPlayer {
   const config = {
     bufferDelayMs: parseInt(bufferDelayInput.value, 10),
     preferredDecoder: decoderPreferenceInput.value as 'webcodecs-hw' | 'webcodecs-sw' | 'wasm',
     debugLogging: debugLoggingInput.checked,
+    pipeline: pipelineConfig,
   };
   
   const newPlayer = createPlayer(config);
@@ -522,6 +527,11 @@ function disconnect() {
     player.dispose();
     player = null;
   }
+
+  if (pipeline) {
+    pipeline.dispose();
+    pipeline = null;
+  }
   
   if (filePlayer) {
     filePlayer.dispose();
@@ -661,6 +671,11 @@ async function connectMoQ() {
   
   setStatus('connecting', 'Connecting to MoQ...');
   log(`Connecting to MoQ relay: ${relayUrl}/${namespace}`);
+
+  if (decodeInWorkerInput.checked) {
+    await connectMoQPipeline(relayUrl, namespace, videoTrack, audioTrack, enableDataTrack ? dataTrack : null);
+    return;
+  }
   
   try {
     // Create player
@@ -732,6 +747,59 @@ async function connectMoQ() {
     
     startRenderLoop();
     
+  } catch (error) {
+    log(`Failed to connect: ${error}`, 'error');
+    setStatus('disconnected', 'Connection failed');
+    disconnect();
+  }
+}
+
+// Connect through the pipeline worker: the MoQ session and the video decode run there,
+// the player here takes the decoded frames. Audio still plays here, off the pipeline's source.
+async function connectMoQPipeline(relayUrl: string, namespace: string, videoTrack: string, audioTrack: string, dataTrack: string | null) {
+  try {
+    const client = PipelineClient.create();
+    pipeline = client;
+
+    videoBytesReceived = 0;
+    dataBytesReceived = 0;
+    activeDataTrackName = dataTrack;
+    updateVideoBytesStat();
+    updateDataBytesStat();
+
+    client.on('connected', () => {
+      setStatus('connected', `Connected to ${namespace} (worker)`);
+      log('Pipeline session connected');
+    });
+    client.on('disconnected', () => {
+      setStatus('disconnected', 'Disconnected');
+      log('Pipeline session disconnected');
+    });
+    client.on('error', (error) => {
+      log(`Pipeline error: ${error.message}`, 'error');
+    });
+    // Video frames stay in the worker, so the byte counts come from its stats
+    client.on('stats', (_tracks, bytes) => {
+      videoBytesReceived += bytes[videoTrack] ?? 0;
+      if (dataTrack) dataBytesReceived += bytes[dataTrack] ?? 0;
+    });
+
+    // The player registers for the track's frames and takes the pipeline's source
+    player = createPlayerInstance({ client, trackName: videoTrack });
+
+    const tracks: Array<{ name: string; streamType: 'video' | 'audio' | 'data' }> = [
+      { name: videoTrack, streamType: 'video' },
+      { name: audioTrack, streamType: 'audio' },
+    ];
+    if (dataTrack) tracks.push({ name: dataTrack, streamType: 'data' });
+
+    await client.connect({ relayUrl, namespace, tracks, debugLogging: debugLoggingInput.checked });
+    player.play();
+    log('Decoding in the pipeline worker');
+    if (dataTrack) log(`Subscribed to data track: ${dataTrack}`);
+
+    updateStats();
+    startRenderLoop();
   } catch (error) {
     log(`Failed to connect: ${error}`, 'error');
     setStatus('disconnected', 'Connection failed');
@@ -1031,6 +1099,11 @@ debugLoggingInput.addEventListener('change', () => {
     player.setDebugLogging(debugLoggingInput.checked);
     log(`Debug logging ${debugLoggingInput.checked ? 'enabled' : 'disabled'}`);
   }
+  pipeline?.setDebugLogging(debugLoggingInput.checked);
+});
+
+decodeInWorkerInput.addEventListener('change', () => {
+  if (pipeline || player) log('Decode in worker applies on the next MoQ connect');
 });
 
 moqEnableDataTrackInput.addEventListener('change', () => {
