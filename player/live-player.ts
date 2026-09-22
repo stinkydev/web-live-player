@@ -1,37 +1,21 @@
 /**
  * Live Video Player
- * 
+ *
  * Main player class that orchestrates stream sources, decoders, and frame scheduling.
  */
 
 import type { IStreamSource, StreamDataEvent } from '../sources/stream-source';
 import type { PreferredDecoder } from '../types';
-import { WebCodecsDecoder } from '../decoders/webcodecs-decoder';
-import { WasmDecoder, YUVFrame } from '../decoders/wasm-decoder';
 import { FrameScheduler, LatencyStats } from '../scheduling/frame-scheduler';
 import { codecDataChanged, rescaleTime, timebaseFromCodecData, MICROSECOND_TIMEBASE, Timebase } from '../protocol/codec-utils';
 import { LiveAudioPlayer } from '../audio/live-audio-player';
 import { BasePlayer } from './base-player';
-import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputing/sesame-api-client';
+import { IVideoFeed, VideoFeed, VideoFeedCallbacks } from './video-feed';
+import { RemoteVideoFeed } from './remote-video-feed';
+import type { PipelineClient } from '../worker/pipeline-client';
+import { FrameType, IMediaCodecData, ParsedFrame } from '@stinkycomputing/sesame-api-client';
 
-/**
- * Player configuration
- */
-/**
- * Chunks the decoder may hold before a delta frame is dropped: ten seconds at 50 fps. A
- * subscription starts with the current group from its first frame, up to a whole GOP at
- * once, and a decoder takes that in its stride; the limit only guards against a decoder
- * that cannot keep up at all. Encoded chunks are small, so the queue costs little.
- */
-const MAX_DECODE_QUEUE = 512;
-
-/** The frames from the last keyframe on; all of them when none is a keyframe. */
-export function framesFromLastKeyframe(frames: ParsedFrame[]): ParsedFrame[] {
-  for (let i = frames.length - 1; i >= 0; i--) {
-    if (frames[i].header?.media?.keyframe) return frames.slice(i);
-  }
-  return frames;
-}
+export { framesFromLastKeyframe, MAX_DECODE_QUEUE } from './video-feed';
 
 export interface PlayerConfig {
   preferredDecoder?: PreferredDecoder;
@@ -45,6 +29,12 @@ export interface PlayerConfig {
   /** Audio track name for MoQ streams (default: 'audio'). Set to null to accept audio from any track. */
   audioTrackName?: string | null;
   debugLogging?: boolean;
+  /**
+   * Decode in a pipeline worker: the worker holds the MoQ session and decodes the named
+   * track, and the player takes its frames. The pipeline's source becomes the player's
+   * stream source, so audio still plays here. setStreamSource is not needed.
+   */
+  pipeline?: { client: PipelineClient; trackName: string };
 }
 
 /**
@@ -108,7 +98,7 @@ export function createPlayer(config: PlayerConfig = {}): LiveVideoPlayer {
  */
 export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private config: PlayerConfig;
-  
+
   // Stream source
   private streamSource: IStreamSource | null = null;
   /** True when the player created the source and must dispose it */
@@ -117,47 +107,18 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   /** Track names already reported as filtered out, so the warning is logged once each */
   private warnedVideoTracks: Set<string> = new Set();
   private boundDataHandler: ((event: StreamDataEvent) => void) | null = null;
-  
-  // Decoder
-  private decoder: WebCodecsDecoder | WasmDecoder | null = null;
-  private currentCodecData: IMediaCodecData | undefined;
-  /** Timebase of the current codec data, cached to keep the decode path allocation-free */
-  private currentTimebase: Timebase = MICROSECOND_TIMEBASE;
-  private useWasmDecoder: boolean = false;
-  private waitingForKeyframe: boolean = true;
-  private lastOverflowLog: number = 0;
-  private lastWaitingForKeyframeLog: number = 0;
-  private lastKeyframeRequest: number = 0;
+
+  // Video: decoded here, or by the pipeline worker on the player's behalf
+  private feed: IVideoFeed;
   private statusLogCounter: number = 0;
-  private isConfiguring: boolean = false;
-  private pendingDuringConfig: ParsedFrame[] = [];  // Queue frames during configuration
-  // While the decoder works through what arrived before it was ready, frames older than the
-  // newest of them are decoded (the chain needs them) but not shown: the first picture on
-  // screen is the live edge, not a fast-forward of the group.
-  private showFromUs: number = -1;
-  
+
   // Frame scheduling
   private frameScheduler: FrameScheduler<VideoFrame>;
   private lastVideoFrame: VideoFrame | null = null;
-  /** Reused I420 staging buffer for the WASM decoder path */
-  private yuvScratch: Uint8Array | null = null;
   private consecutiveDrops: number = 0;
   private totalDrops: number = 0;
   private lastDropLogTime: number = 0;
-  
-  // Metadata
-  private streamWidth: number = 0;
-  private streamHeight: number = 0;
-  private estimatedFrameRate: number = 30; // Default, will be estimated from timestamps
-  
-  // FPS estimation from video timestamps
-  private lastVideoTimestampUs: number = -1;
-  private static readonly FPS_SAMPLE_COUNT = 10;  // Number of samples for averaging
-  private fpsSamples = new Float64Array(LiveVideoPlayer.FPS_SAMPLE_COUNT);  // Recent frame duration samples
-  private fpsSampleWrite: number = 0;
-  private fpsSampleCount: number = 0;
-  private fpsSampleSum: number = 0;
-  
+
   // Audio
   private audioContext: AudioContext | null = null;
   private audioPlayer: LiveAudioPlayer | null = null;
@@ -169,16 +130,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private audioInitializing: boolean = false;
   private pendingAudioDuringInit: ParsedFrame[] = [];
   private static readonly MAX_PENDING_AUDIO = 32;
-  
-  // Timing tracking: fixed ring of recent packets, keyed by frame timestamp.
-  // Parallel typed arrays so recording a packet allocates nothing.
-  private static readonly TIMING_RING_SIZE = 128;
-  private timingTimestamps = new Float64Array(LiveVideoPlayer.TIMING_RING_SIZE);
-  private timingArrivals = new Float64Array(LiveVideoPlayer.TIMING_RING_SIZE);
-  private timingKeyframes = new Uint8Array(LiveVideoPlayer.TIMING_RING_SIZE);
-  private timingWrite: number = 0;
-  private timingCount: number = 0;
-  
+
   // Bandwidth tracking
   private videoBytesReceived: number = 0;
   private audioBytesReceived: number = 0;
@@ -190,10 +142,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     audioBytesPerSecond: 0,
     totalBytesPerSecond: 0,
   };
-  
+
   constructor(config: PlayerConfig = {}) {
     super('idle', config.debugLogging ?? false);
-    
+
     this.config = {
       preferredDecoder: config.preferredDecoder ?? 'webcodecs-sw',
       bufferDelayMs: config.bufferDelayMs ?? 100,
@@ -201,8 +153,9 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       videoTrackName: config.videoTrackName === undefined ? 'video' : config.videoTrackName,
       audioTrackName: config.audioTrackName === undefined ? 'audio' : config.audioTrackName,
       debugLogging: config.debugLogging ?? false,
+      pipeline: config.pipeline,
     };
-    
+
     // Initialize audio context if enabled
     if (this.config.enableAudio) {
       if (config.audioContext) {
@@ -213,7 +166,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         this.ownsAudioContext = true;
       }
     }
-    
+
     // Initialize frame scheduler
     this.frameScheduler = new FrameScheduler<VideoFrame>({
       bufferDelayMs: this.config.bufferDelayMs,
@@ -226,7 +179,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       onFrameDropped: (frame, reason) => {
         this.totalDrops++;
         this.consecutiveDrops++;
-        
+
         // Only log drops if debug logging is enabled
         if (this.config.debugLogging) {
           const now = Date.now();
@@ -241,18 +194,43 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
             this.consecutiveDrops = 0;
           }
         }
-        
+
         frame.close();
       },
     });
+
+    const callbacks: VideoFeedCallbacks = {
+      onFrame: (frame, timestampUs, arrivalTime, decodeTime, isKeyframe) => {
+        this.frameScheduler.enqueueFrame(frame, timestampUs, arrivalTime, decodeTime, isKeyframe);
+        this.emit1('frame', frame);
+      },
+      onMetadata: (metadata) => this.emit('metadata', metadata),
+      onError: (error, fatal) => {
+        if (fatal) this.setState('error');
+        this.emit('error', error);
+      },
+      requestKeyframe: () => this.streamSource?.requestKeyframe?.(),
+    };
+    if (config.pipeline) {
+      this.feed = new RemoteVideoFeed(config.pipeline.client, config.pipeline.trackName, this.config.preferredDecoder, callbacks);
+      this.setStreamSource(config.pipeline.client.source);
+      this.setTrackFilter(config.pipeline.trackName);
+    } else {
+      this.feed = new VideoFeed({
+        preferredDecoder: this.config.preferredDecoder,
+        logger: this.logger,
+        debugLogging: this.config.debugLogging,
+      }, callbacks);
+    }
   }
-  
+
   /**
    * Enable or disable debug logging at runtime
    */
   override setDebugLogging(enabled: boolean): void {
     this.config.debugLogging = enabled;
     super.setDebugLogging(enabled);
+    this.feed.setDebugLogging(enabled);
   }
 
   /**
@@ -273,7 +251,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   getVolume(): number {
     return this.volume;
   }
-  
+
   /**
    * Set the stream source (dependency injection)
    *
@@ -294,10 +272,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.streamSource = source;
     this.boundDataHandler = this.handleStreamData.bind(this);
     this.streamSource.on('data', this.boundDataHandler);
-    
+
     this.logger.info('Stream source connected');
   }
-  
+
   /**
    * Set the track name to filter for
    */
@@ -305,14 +283,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.trackFilter = trackName;
     this.logger.info(`Track filter set: ${trackName}`);
   }
-  
+
   /**
    * Convenience method to connect to a MoQ-like session
-   * 
+   *
    * Note: For audio support, the MoQ session must also be subscribed to the audio track.
    * When using MoQSource, include both 'video' and 'audio' in subscriptions.
    * When using Elmo's MoQSessionNode, add an audio track to the session config.
-   * 
+   *
    * @param session - MoQ session implementing IStreamSource (e.g., Elmo's MoQSessionNode)
    * @param videoTrackName - Video track name (defaults to config.videoTrackName or 'video')
    */
@@ -323,10 +301,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.setTrackFilter(videoTrackName);
     }
   }
-  
+
   /**
    * Connect to a MoQ relay directly with video and optional audio tracks
-   * 
+   *
    * The player owns the source it creates here and disposes it on `dispose()`.
    * The source is returned so it can be inspected or torn down early.
    *
@@ -340,35 +318,35 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     options?: { videoTrack?: string; audioTrack?: string | false }
   ): Promise<IStreamSource> {
     const { createMoQSource } = await import('../sources/moq-source');
-    
+
     const videoTrack = options?.videoTrack ?? this.config.videoTrackName ?? 'video';
-    const audioTrack = options?.audioTrack === false 
-      ? null 
+    const audioTrack = options?.audioTrack === false
+      ? null
       : (options?.audioTrack ?? this.config.audioTrackName ?? 'audio');
-    
+
     const subscriptions: any[] = [
       { trackName: videoTrack, streamType: 'video', priority: 0 },
     ];
-    
+
     if (audioTrack && this.config.enableAudio) {
       subscriptions.push({ trackName: audioTrack, streamType: 'audio', priority: 0 });
     }
-    
+
     this.logger.info(`MoQ subscriptions: ${JSON.stringify(subscriptions)}`);
-    
+
     const source = createMoQSource({
       relayUrl,
       namespace,
       subscriptions,
     });
-    
+
     this.setStreamSource(source);
     this.ownsStreamSource = true;
     await source.connect();
 
     return source;
   }
-  
+
   /**
    * Start playback
    */
@@ -376,11 +354,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     if (this._state === 'error') {
       return;
     }
-    
+
     this.setState('playing');
     this.logger.info('Playback started');
   }
-  
+
   /**
    * Pause playback
    */
@@ -390,7 +368,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.logger.info('Playback paused');
     }
   }
-  
+
   /**
    * Get a video frame for rendering
    *
@@ -407,7 +385,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       }
       return this.lastVideoFrame;
     }
-    
+
     // Periodic status logging when debug is enabled
     if (this.config.debugLogging) {
       this.statusLogCounter++;
@@ -416,23 +394,23 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         this.statusLogCounter = 0;
       }
     }
-    
+
     const frame = this.frameScheduler.dequeue(timestampMs);
-    
+
     if (frame) {
       // Reset consecutive drop counter when we successfully get a frame
       this.consecutiveDrops = 0;
-      
+
       // Close the previous frame
       if (this.lastVideoFrame && this.lastVideoFrame !== frame) {
         this.lastVideoFrame.close();
       }
       this.lastVideoFrame = frame;
     }
-    
+
     return this.lastVideoFrame;
   }
-  
+
   /**
    * Set buffer delay in milliseconds (syncs both video and audio)
    */
@@ -441,14 +419,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.frameScheduler.setBufferDelay(delayMs);
     this.audioPlayer?.setBufferDelay(delayMs);
   }
-  
+
   /**
    * Get current buffer delay in milliseconds
    */
   getBufferDelay(): number {
     return this.frameScheduler.getBufferDelay();
   }
-  
+
   /**
    * Set preferred decoder type
    * If decoder type changes while playing, dispose old decoder and request keyframe
@@ -456,81 +434,51 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   setPreferredDecoder(type: PreferredDecoder): void {
     const oldType = this.config.preferredDecoder;
     this.config.preferredDecoder = type;
-    
-    // Check if decoder type category changed (webcodecs vs wasm)
-    const wasWasm = oldType === 'wasm';
-    const isWasm = type === 'wasm';
-    
-    if (wasWasm !== isWasm && this.decoder) {
-      this.logger.info(`Decoder type changed from ${oldType} to ${type}, switching decoder...`);
-      
-      // Dispose old decoder
-      this.decoder.dispose();
-      this.decoder = null;
-      
-      // Clear frame buffer
-      this.frameScheduler.clear();
-      
-      // Close last video frame
-      if (this.lastVideoFrame) {
-        this.lastVideoFrame.close();
-        this.lastVideoFrame = null;
-      }
-      
-      // Wait for keyframe and reconfigure
-      this.waitingForKeyframe = true;
-      this.currentCodecData = undefined;
-      
-      // Request keyframe to restart
-      this.streamSource?.requestKeyframe?.();
-      this.logger.info('Keyframe requested for decoder switch');
-    } else if (oldType !== type && this.decoder) {
-      // Same decoder family but different preference (hw vs sw)
-      // Just reconfigure on next keyframe
-      this.logger.info(`Decoder preference changed from ${oldType} to ${type}`);
-      this.waitingForKeyframe = true;
-      this.currentCodecData = undefined;
-      this.decoder.dispose();
-      this.decoder = null;
-      this.frameScheduler.clear();
-      this.streamSource?.requestKeyframe?.();
+
+    if (!this.feed.setPreferredDecoder(type)) {
+      return;
     }
+    // The decoder was dropped: what it produced is stale
+    this.frameScheduler.clear();
+
+    // Across decoder families the picture restarts; a preference change within one holds
+    // the last frame until the new decoder delivers
+    if ((oldType === 'wasm') !== (type === 'wasm') && this.lastVideoFrame) {
+      this.lastVideoFrame.close();
+      this.lastVideoFrame = null;
+    }
+    this.logger.info('Keyframe requested for decoder switch');
   }
-  
+
   /**
    * Flush the player pipeline (decoder, frame buffer)
    * Used to recover from queue overflow or when seeking
    */
   flush(): void {
     this.logger.info('Flushing player pipeline');
-    this.waitingForKeyframe = true;
-    this.showFromUs = -1;
-    
-    // Flush decoder
-    this.decoder?.flushSync();
-    
+
+    // Flush decoder; it asks the source for a keyframe
+    this.feed.flush();
+
     // Clear frame buffer
     this.frameScheduler.clear();
-    
+
     // Close last frame
     if (this.lastVideoFrame) {
       this.lastVideoFrame.close();
       this.lastVideoFrame = null;
     }
-    
-    // Request new keyframe from source
-    this.streamSource?.requestKeyframe?.();
   }
-  
+
   /**
    * Get player statistics
    */
   getStats(): PlayerStats {
     const schedulerStatus = this.frameScheduler.getStatus();
-    
+
     // Update bandwidth calculation
     this.updateBandwidthStats();
-    
+
     return {
       bufferSize: schedulerStatus.currentBufferSize,
       bufferMs: schedulerStatus.currentBufferMs,
@@ -538,68 +486,68 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       targetBufferMs: schedulerStatus.targetBufferMs,
       droppedFrames: schedulerStatus.droppedFrames,
       totalFrames: schedulerStatus.totalEnqueuedFrames,
-      decoderState: this.decoder?.state ?? 'none',
-      streamWidth: this.streamWidth,
-      streamHeight: this.streamHeight,
-      frameRate: this.estimatedFrameRate,
+      decoderState: this.feed.decoderState,
+      streamWidth: this.feed.streamWidth,
+      streamHeight: this.feed.streamHeight,
+      frameRate: this.feed.frameRate,
       latency: schedulerStatus.latency,
       bandwidth: this.currentBandwidth,
     };
   }
-  
+
   /**
    * Update bandwidth statistics
    */
   private updateBandwidthStats(): void {
     const now = performance.now();
     const elapsed = now - this.lastBandwidthUpdateTime;
-    
+
     // Update every 500ms minimum to avoid jittery stats
     if (elapsed < 500) {
       return;
     }
-    
+
     const elapsedSeconds = elapsed / 1000;
     const videoBytesDelta = this.videoBytesReceived - this.lastVideoBytesReceived;
     const audioBytesDelta = this.audioBytesReceived - this.lastAudioBytesReceived;
-    
+
     this.currentBandwidth = {
       videoBytesPerSecond: videoBytesDelta / elapsedSeconds,
       audioBytesPerSecond: audioBytesDelta / elapsedSeconds,
       totalBytesPerSecond: (videoBytesDelta + audioBytesDelta) / elapsedSeconds,
     };
-    
+
     this.lastBandwidthUpdateTime = now;
     this.lastVideoBytesReceived = this.videoBytesReceived;
     this.lastAudioBytesReceived = this.audioBytesReceived;
   }
-  
+
   /**
    * Get packet timing history for visualization/debugging
    */
   getPacketTimingHistory() {
     return this.frameScheduler.getPacketTimingHistory();
   }
-  
+
   /**
    * Subscribe to player events (typed overload)
    */
   override on<K extends keyof PlayerEventMap>(event: K, handler: PlayerEventMap[K]): void {
     super.on(event, handler);
   }
-  
+
   /**
    * Unsubscribe from player events (typed overload)
    */
   override off<K extends keyof PlayerEventMap>(event: K, handler: PlayerEventMap[K]): void {
     super.off(event, handler);
   }
-  
+
   /**
    * Handle incoming stream data
    *
-   * Synchronous on the steady-state path; the codec-change and audio-init
-   * branches hand off to async helpers.
+   * Synchronous on the steady-state path; the video feed and the audio-init
+   * branch hand off to async helpers.
    */
   private handleStreamData(event: StreamDataEvent): void {
     const data = event.data;
@@ -607,17 +555,17 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     if (!data.valid || !data.header) {
       return;
     }
-    
-    // Track bandwidth - count payload bytes
-    const payloadBytes = data.payload?.byteLength || 0;
-    
+
+    // Track bandwidth - count what came over the wire
+    const payloadBytes = event.wireBytes ?? (data.payload?.byteLength || 0);
+
     // Route audio to handler - audio may come on separate "audio" track (MoQ)
     // or on the same connection as video (WebSocket)
     const isAudioPacket = data.header.type === FrameType.FRAME_TYPE_AUDIO || event.streamType === 'audio';
     if (isAudioPacket) {
       // Track audio bandwidth
       this.audioBytesReceived += payloadBytes;
-      
+
       // For MoQ: audio comes on a separate track (e.g., "audio")
       // For WebSocket: audio comes on the same track as video (e.g., "default")
       // Only filter by audioTrackName if it's explicitly set AND matches a track-based pattern
@@ -632,10 +580,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.handleAudioData(data);
       return;
     }
-    
+
     // Track video bandwidth
     this.videoBytesReceived += payloadBytes;
-    
+
     // Filter by track name for video if set (trackFilter overrides config)
     const videoTrack = this.trackFilter ?? this.config.videoTrackName;
     if (videoTrack !== null && videoTrack !== undefined && event.trackName !== videoTrack) {
@@ -650,208 +598,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       }
       return;
     }
-    
+
     // Handle video frames
     if (event.streamType !== 'video') {
       return;
     }
-    
-    if (!data.header.media?.codecData) {
-      return;
-    }
-    
-    const isKeyframe = !!(data.header.media?.keyframe);
-    
-    // Check for codec changes
-    if (codecDataChanged(this.currentCodecData, data.header.media?.codecData)) {
-      // Need keyframe to reconfigure
-      if (!isKeyframe) {
-        this.logger.debug('Waiting for keyframe (codec change)');
-        return;
-      }
 
-      // Decoder construction happens outside configureDecoder's own try, so this can
-      // reject - handle it here rather than as an unhandled rejection
-      this.reconfigureAndReplay(data, data.header.media.codecData)
-        .catch((error) => {
-          this.isConfiguring = false;
-          this.pendingDuringConfig = [];
-          this.logger.error(`Decoder reconfiguration failed: ${error}`);
-          this.emit1('error', error instanceof Error ? error : new Error(String(error)));
-        });
-      return; // The keyframe is replayed once the decoder is ready
-    }
-
-    // Queue frames that arrive during configuration
-    if (this.isConfiguring) {
-      if (this.config.debugLogging) {
-        this.logger.debug(`Queueing frame pts=${data.header.media?.pts} during configuration`);
-      }
-      this.pendingDuringConfig.push(data);
-      return;
-    }
-
-    // Ensure decoder is ready
-    if (!this.decoder || this.decoder.state !== 'configured') {
-      this.logger.warn(`Dropping frame pts=${data.header.media?.pts}: decoder not ready (state=${this.decoder?.state ?? 'null'})`);
-      return;
-    }
-
-    this.decodeVideoFrame(data);
-  }
-
-  /** Decode one video frame: dropped while waiting for a keyframe, else timed and sent on. */
-  private decodeVideoFrame(data: ParsedFrame): void {
-    if (!this.decoder || !data.header?.media) return;
-    const isKeyframe = !!data.header.media.keyframe;
-
-    // Wait for keyframe after configuration or flush
-    if (this.waitingForKeyframe) {
-      if (!isKeyframe) {
-        if (this.config.debugLogging) {
-          this.logger.debug(`Dropping frame pts=${data.header.media?.pts}: waiting for keyframe`);
-        }
-        const now = Date.now();
-        // Log occasionally to avoid spam
-        if (!this.lastWaitingForKeyframeLog || now - this.lastWaitingForKeyframeLog > 1000) {
-          this.logger.info('Waiting for keyframe to resume playback...');
-          this.lastWaitingForKeyframeLog = now;
-          
-          // Request keyframe periodically while waiting
-          if (!this.lastKeyframeRequest || now - this.lastKeyframeRequest > 1000) {
-            this.logger.info('Requesting keyframe...');
-            this.streamSource?.requestKeyframe?.();
-            this.lastKeyframeRequest = now;
-          }
-        }
-        return;
-      }
-      this.logger.debug('Keyframe received, resuming decode');
-      this.waitingForKeyframe = false;
-      this.lastWaitingForKeyframeLog = 0;
-    }
-    
-    // Decode the frame
-    try {
-      // Record arrival time for latency tracking
-      // Use rescaled PTS (microseconds) as key to match what decoder outputs
-      const arrivalTime = performance.now();
-      const timestampUs = rescaleTime(data.header.media?.pts ?? 0, this.currentTimebase, MICROSECOND_TIMEBASE);
-      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe);
-
-      // Estimate FPS from timestamp difference between consecutive frames
-      if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
-        const frameDurationUs = timestampUs - this.lastVideoTimestampUs;
-        // Only accept reasonable frame durations (1-200 fps range)
-        if (frameDurationUs > 5000 && frameDurationUs < 1000000) {
-          this.addFpsSample(frameDurationUs);
-        }
-      }
-      this.lastVideoTimestampUs = timestampUs;
-
-      this.decoder.decodeBinary(data, timestampUs);
-    } catch (error) {
-      this.logger.error(`Decode error: ${error}`);
-    }
-  }
-
-  /**
-   * Reconfigure the decoder for new codec data, then replay the keyframe and
-   * anything that arrived while configuring.
-   */
-  private async reconfigureAndReplay(
-    keyframeData: ParsedFrame,
-    codecData: IMediaCodecData
-  ): Promise<void> {
-    this.currentCodecData = codecData;
-    this.currentTimebase = timebaseFromCodecData(codecData);
-    this.isConfiguring = true;
-    this.pendingDuringConfig = [keyframeData]; // Queue the keyframe itself
-
-    // Stream timestamps often restart across a codec change, so drop the timing
-    // history rather than risk matching a new frame against a stale entry
-    this.timingWrite = 0;
-    this.timingCount = 0;
-
-    try {
-      await this.configureDecoder(codecData);
-    } finally {
-      // Always clear the flag, otherwise every later frame would be queued
-      this.isConfiguring = false;
-    }
-
-    this.waitingForKeyframe = true;
-
-    // Replay what arrived while configuring, from the newest keyframe: anything older
-    // would only be decoded to be dropped by the scheduler
-    const queued = this.pendingDuringConfig;
-    this.pendingDuringConfig = [];
-    const pending = framesFromLastKeyframe(queued);
-    this.logger.info(`Processing ${pending.length} of ${queued.length} frames queued during configuration`);
-    const newest = pending[pending.length - 1]?.header?.media;
-    this.showFromUs = pending.length > 1 && newest ? rescaleTime(newest.pts ?? 0, this.currentTimebase, MICROSECOND_TIMEBASE) : -1;
-    for (const pendingData of pending) {
-      this.decodeVideoFrame(pendingData);
-    }
-  }
-
-  /** Whether a decoded frame is older than the live edge the player is catching up to. */
-  private behindLiveEdge(timestampUs: number): boolean {
-    if (this.showFromUs < 0) return false;
-    if (timestampUs < this.showFromUs) return true;
-    this.showFromUs = -1;
-    return false;
-  }
-
-  /** Record a packet's arrival time and keyframe flag in the timing ring */
-  private recordPacketTiming(timestampUs: number, arrivalTime: number, isKeyframe: boolean): void {
-    const i = this.timingWrite;
-    this.timingTimestamps[i] = timestampUs;
-    this.timingArrivals[i] = arrivalTime;
-    this.timingKeyframes[i] = isKeyframe ? 1 : 0;
-    this.timingWrite = (i + 1) % LiveVideoPlayer.TIMING_RING_SIZE;
-    if (this.timingCount < LiveVideoPlayer.TIMING_RING_SIZE) {
-      this.timingCount++;
-    }
-  }
-
-  /** Find a recorded packet by stream timestamp, newest first. Returns -1 if unknown. */
-  private findPacketTiming(timestampUs: number): number {
-    const size = LiveVideoPlayer.TIMING_RING_SIZE;
-    for (let n = 1; n <= this.timingCount; n++) {
-      const i = (this.timingWrite - n + size) % size;
-      if (this.timingTimestamps[i] === timestampUs) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  /** Add a frame duration sample and update the frame rate estimate */
-  private addFpsSample(frameDurationUs: number): void {
-    const i = this.fpsSampleWrite;
-    if (this.fpsSampleCount === LiveVideoPlayer.FPS_SAMPLE_COUNT) {
-      this.fpsSampleSum -= this.fpsSamples[i];
-    } else {
-      this.fpsSampleCount++;
-    }
-    this.fpsSamples[i] = frameDurationUs;
-    this.fpsSampleSum += frameDurationUs;
-    this.fpsSampleWrite = (i + 1) % LiveVideoPlayer.FPS_SAMPLE_COUNT;
-
-    if (this.fpsSampleCount >= 3) {
-      const avgDurationUs = this.fpsSampleSum / this.fpsSampleCount;
-      this.estimatedFrameRate = Math.round(1000000 / avgDurationUs);
-    }
-  }
-
-  /** Reset the frame rate estimate to its default */
-  private resetFpsEstimate(): void {
-    this.lastVideoTimestampUs = -1;
-    this.fpsSampleWrite = 0;
-    this.fpsSampleCount = 0;
-    this.fpsSampleSum = 0;
-    this.estimatedFrameRate = 30;
+    this.feed.push(data);
   }
 
   /**
@@ -974,230 +727,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       }
     }
   }
-  
-  /**
-   * Configure the decoder for a specific codec
-   */
-  private async configureDecoder(codecData: IMediaCodecData): Promise<void> {
-    this.useWasmDecoder = this.config.preferredDecoder === 'wasm';
-    
-    // Create decoder if needed
-    if (!this.decoder || (this.useWasmDecoder && this.decoder instanceof WebCodecsDecoder) || 
-        (!this.useWasmDecoder && this.decoder instanceof WasmDecoder)) {
-      // Dispose old decoder if switching types
-      if (this.decoder) {
-        this.decoder.dispose();
-      }
-      
-      if (this.useWasmDecoder) {
-        this.logger.info('Using WASM decoder');
-        this.decoder = new WasmDecoder({
-          onFrameDecoded: (frame) => this.handleDecodedYUVFrame(frame),
-          onError: (error) => this.handleDecoderError(error),
-          onQueueOverflow: (queueSize) => this.handleQueueOverflow(queueSize),
-          maxQueueSize: MAX_DECODE_QUEUE,
-        });
-      } else {
-        this.logger.info(`Using WebCodecs decoder (${this.config.preferredDecoder})`);
-        this.decoder = new WebCodecsDecoder({
-          logger: this.logger,
-          onFrameDecoded: (frame) => this.handleDecodedFrame(frame),
-          onError: (error) => this.handleDecoderError(error),
-          onQueueOverflow: (queueSize) => this.handleQueueOverflow(queueSize),
-          maxQueueSize: MAX_DECODE_QUEUE,
-        });
-      }
-    }
-    
-    const preferHardware = this.config.preferredDecoder === 'webcodecs-hw';
-    
-    try {
-      if (this.useWasmDecoder) {
-        await (this.decoder as WasmDecoder).configure(codecData);
-      } else {
-        await (this.decoder as WebCodecsDecoder).configure(codecData, preferHardware);
-      }
-      
-      // Update metadata
-      this.streamWidth = codecData.width || 0;
-      this.streamHeight = codecData.height || 0;
-      
-      // Reset FPS estimation for new stream (keep default of 30 until estimated)
-      this.resetFpsEstimate();
 
-      this.emit('metadata', {
-        width: codecData.width,
-        height: codecData.height,
-        codec: this.getCodecName(codecData.codecType || sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AVC),
-      });
-      
-    } catch (error) {
-      this.logger.error(`Failed to configure decoder: ${error}`);
-      this.setState('error');
-      this.emit('error', error instanceof Error ? error : new Error(String(error)));
-    }
-  }
-  
-  private getCodecName(codecType: sesame.v1.common.CodecType): string {
-    switch (codecType) {
-      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AVC: return 'H.264';
-      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_HEVC: return 'HEVC';
-      case sesame.v1.common.CodecType.CODEC_TYPE_VIDEO_AV1: return 'AV1';
-      default: return 'Unknown';
-    }
-  }
-  
-  /**
-   * Handle decoded video frame (from WebCodecs)
-   */
-  private handleDecodedFrame(frame: VideoFrame): void {
-    if (this.behindLiveEdge(frame.timestamp)) {
-      frame.close();
-      return;
-    }
-    const decodeTime = performance.now();
-    const i = this.findPacketTiming(frame.timestamp);
-    const arrivalTime = i >= 0 ? this.timingArrivals[i] : decodeTime;
-    const isKeyframe = i >= 0 ? this.timingKeyframes[i] === 1 : false;
-
-    this.frameScheduler.enqueueFrame(frame, frame.timestamp, arrivalTime, decodeTime, isKeyframe);
-    this.emit1('frame', frame);
-  }
-  
-  /**
-   * Handle decoded YUV frame (from WASM decoder)
-   * Converts YUV to VideoFrame using canvas
-   */
-  private handleDecodedYUVFrame(yuvFrame: YUVFrame): void {
-    if (this.behindLiveEdge(yuvFrame.timestamp)) return;
-    const decodeTime = performance.now();
-    const i = this.findPacketTiming(yuvFrame.timestamp);
-    const arrivalTime = i >= 0 ? this.timingArrivals[i] : decodeTime;
-    const isKeyframe = i >= 0 ? this.timingKeyframes[i] === 1 : false;
-
-    // Pass actual video dimensions for visible rect (decoder may output padded dimensions)
-    const videoFrame = this.convertYUVToVideoFrame(yuvFrame, this.streamWidth, this.streamHeight);
-    if (videoFrame) {
-      this.frameScheduler.enqueueFrame(videoFrame, yuvFrame.timestamp, arrivalTime, decodeTime, isKeyframe);
-      this.emit1('frame', videoFrame);
-    }
-  }
-  
-  /**
-   * Get a scratch buffer of at least `size` bytes for I420 repacking.
-   *
-   * The VideoFrame constructor copies the data it is given, so one buffer can
-   * be reused for every frame.
-   */
-  private getYUVScratch(size: number): Uint8Array {
-    if (!this.yuvScratch || this.yuvScratch.byteLength < size) {
-      this.yuvScratch = new Uint8Array(size);
-    }
-    return this.yuvScratch;
-  }
-
-  /**
-   * Convert YUV frame to VideoFrame using native I420 support
-   * Much faster than manual pixel-by-pixel conversion
-   * 
-   * @param yuv - YUV frame data from decoder (may have padded dimensions)
-   * @param visibleWidth - Actual video width (unpadded)
-   * @param visibleHeight - Actual video height (unpadded)
-   */
-  private convertYUVToVideoFrame(yuv: YUVFrame, visibleWidth: number, visibleHeight: number): VideoFrame | null {
-    try {
-      const { y, u, v, width, height, chromaStride, chromaHeight } = yuv;
-
-      // Use actual video dimensions if available, otherwise use decoded dimensions
-      const actualWidth = visibleWidth > 0 ? visibleWidth : width;
-      const actualHeight = visibleHeight > 0 ? visibleHeight : height;
-
-      // VideoFrame supports I420 format directly - GPU handles YUV→RGB
-      // Broadway decoder outputs Y with stride=width, UV with chromaStride
-      const yStride = width;
-      const ySize = yStride * height;
-      const chromaWidth = width >> 1;
-      const uvSize = chromaStride * chromaHeight;
-      const totalSize = ySize + uvSize * 2;
-
-      let data: Uint8Array;
-
-      if (yuv.data && chromaStride === chromaWidth && yuv.data.byteLength >= totalSize) {
-        // Planes are already contiguous in I420 order - hand the buffer over as is
-        data = yuv.data;
-      } else {
-        data = this.getYUVScratch(ySize + chromaWidth * chromaHeight * 2);
-
-        // Copy Y plane (stride matches width for Broadway)
-        data.set(y.subarray(0, ySize), 0);
-
-        // Copy U plane
-        const uOffset = ySize;
-        if (chromaStride === chromaWidth) {
-          // Contiguous - fast copy
-          data.set(u.subarray(0, uvSize), uOffset);
-        } else {
-          // Strided - copy row by row
-          for (let row = 0; row < chromaHeight; row++) {
-            data.set(u.subarray(row * chromaStride, row * chromaStride + chromaWidth), uOffset + row * chromaWidth);
-          }
-        }
-
-        // Copy V plane
-        const vOffset = uOffset + chromaWidth * chromaHeight;
-        if (chromaStride === chromaWidth) {
-          data.set(v.subarray(0, uvSize), vOffset);
-        } else {
-          for (let row = 0; row < chromaHeight; row++) {
-            data.set(v.subarray(row * chromaStride, row * chromaStride + chromaWidth), vOffset + row * chromaWidth);
-          }
-        }
-      }
-
-      // Create VideoFrame with I420 format - browser handles YUV→RGB on GPU
-      // Use visibleRect to crop padding from H.264 macroblock alignment
-      return new VideoFrame(data, {
-        format: 'I420',
-        codedWidth: width,
-        codedHeight: height,
-        visibleRect: {
-          x: 0,
-          y: 0,
-          width: actualWidth,
-          height: actualHeight,
-        },
-        timestamp: yuv.timestamp,
-        duration: this.estimatedFrameRate > 0 ? 1_000_000 / this.estimatedFrameRate : 33333,
-      });
-    } catch (error) {
-      this.logger.error(`YUV conversion error: ${error}`);
-      return null;
-    }
-  }
-  
-  /**
-   * Handle decoder error
-   */
-  private handleDecoderError(error: Error): void {
-    this.logger.error(`Decoder error: ${error.message}`);
-    this.emit('error', error);
-  }
-  
-  /**
-   * The decoder dropped a delta frame because its queue is full. What is queued keeps
-   * decoding and showing; decoding resumes at the next keyframe, which the decoder
-   * accepts even with a full queue (it restarts from it). Resetting here would throw the
-   * queued frames away and black out until that keyframe for no gain.
-   */
-  private handleQueueOverflow(queueSize: number): void {
-    const now = Date.now();
-    if (!this.lastOverflowLog || now - this.lastOverflowLog > 1000) {
-      this.logger.warn(`Decoder queue full (${queueSize} frames), dropping until the next keyframe`);
-      this.lastOverflowLog = now;
-    }
-    this.waitingForKeyframe = true;
-  }
-  
   /**
    * Dispose the player and release resources
    */
@@ -1212,13 +742,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.ownsStreamSource = false;
     this.streamSource = null;
     this.boundDataHandler = null;
-    
-    // Dispose video decoder
-    if (this.decoder) {
-      this.decoder.dispose();
-      this.decoder = null;
-    }
-    
+
+    // Dispose the video feed (the decoder, or the worker's decode of the track)
+    this.feed.dispose();
+
     // Dispose audio player
     if (this.audioPlayer) {
       this.audioPlayer.dispose();
@@ -1226,7 +753,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
     this.audioInitializing = false;
     this.pendingAudioDuringInit = [];
-    
+
     // Close audio context if we own it
     if (this.ownsAudioContext && this.audioContext) {
       this.audioContext.close();
@@ -1234,29 +761,19 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.audioContext = null;
     this.audioCodecData = null;
     this.audioTimebase = MICROSECOND_TIMEBASE;
-    
+
     // Clear frame buffer
     this.frameScheduler.clear();
-    
+
     // Close last frame
     if (this.lastVideoFrame) {
       this.lastVideoFrame.close();
       this.lastVideoFrame = null;
     }
-    
-    // Clear timing tracking
-    this.timingWrite = 0;
-    this.timingCount = 0;
-    this.yuvScratch = null;
 
-    // Reset state
-    this.currentCodecData = undefined;
-    this.currentTimebase = MICROSECOND_TIMEBASE;
-    this.waitingForKeyframe = true;
-    this.showFromUs = -1;
     this.totalDrops = 0;
     this.consecutiveDrops = 0;
-    
+
     this.warnedVideoTracks.clear();
 
     // Deliver the final statechange before dropping the handlers

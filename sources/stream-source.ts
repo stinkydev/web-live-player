@@ -16,6 +16,8 @@ export interface StreamDataEvent {
   trackName: string;
   streamType: 'video' | 'audio' | 'data';
   data: ParsedFrame;
+  /** The frame's size on the wire, when it differs from what data holds (a header-only frame). */
+  wireBytes?: number;
 }
 
 /**
@@ -114,7 +116,7 @@ export abstract class BaseStreamSource implements IStreamSource {
    * Parse raw binary data using the wire protocol and emit a typed stream event.
    * Shared by all transport sources (WebSocket, MoQ, etc.) to ensure consistent handling.
    */
-  protected parseAndEmitStreamData(trackName: string, data: Uint8Array): void {
+  protected parseAndEmitStreamData(trackName: string, data: Uint8Array, wireBytes?: number): void {
     try {
       const parsedData = WireProtocol.parse(data);
 
@@ -135,6 +137,7 @@ export abstract class BaseStreamSource implements IStreamSource {
         streamType,
         data: parsedData,
       };
+      if (wireBytes !== undefined) event.wireBytes = wireBytes;
 
       this.emit('data', event);
     } catch (error) {

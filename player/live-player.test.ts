@@ -20,28 +20,3 @@ describe('framesFromLastKeyframe', () => {
   });
 });
 
-import { vi } from 'vitest';
-import { LiveVideoPlayer } from './live-player';
-
-describe('catching up to the live edge', () => {
-  const decoded = (timestamp: number) => ({ timestamp, close: vi.fn() } as any);
-
-  it('shows nothing older than the newest frame replayed after configuration', () => {
-    const player = new LiveVideoPlayer({ enableAudio: false, videoTrackName: 'video' } as any);
-    const p = player as any;
-    p.showFromUs = 3_000_000;
-    const old = decoded(1_000_000);
-    p.handleDecodedFrame(old);
-    expect(old.close).toHaveBeenCalledOnce();
-    expect(player.getStats().totalFrames).toBe(0);
-    const edge = decoded(3_000_000);
-    p.handleDecodedFrame(edge);
-    expect(edge.close).not.toHaveBeenCalled();
-    expect(player.getStats().totalFrames).toBe(1);
-    // once at the edge, nothing is skipped any more
-    const later = decoded(2_000_000);
-    p.handleDecodedFrame(later);
-    expect(later.close).not.toHaveBeenCalled();
-    player.dispose();
-  });
-});

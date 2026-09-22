@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here.
 
+## 0.1.29
+
+### Added
+
+- **A pipeline worker: the MoQ session and the video decoders off the main thread.**
+  `PipelineClient.create()` spawns it; `connect()` opens the session there. A
+  `LiveVideoPlayer` given `{ pipeline: { client, trackName } }` takes that track's frames
+  from the worker instead of decoding itself: the worker parses and decodes the video
+  tracks it is asked for and posts each decoded `VideoFrame` as a transfer, so the main
+  thread does nothing per frame but schedule and draw. Frames the main thread has not
+  taken are not queued behind it: past a window of eight the worker closes them. Audio and
+  data tracks cross as their wire bytes and come out of `client.source`, an
+  `IStreamSource`, parsed as they would have been off the transport, so audio still plays
+  on the main thread as before; a video track's headers come out of it too, without their
+  payload, on keyframes and when they carry side data. `getVideoFrame`, `setBufferDelay`,
+  `setPreferredDecoder`, `flush` and `getStats` work as they do for a local decode. The
+  worker is inlined into the library bundle, which grows by its size; a consumer serves
+  no worker file.
+- **`VideoFeed`**, the decode side of the player as its own class: codec changes and the
+  replay after a reconfigure, the keyframe wait, the catch-up to the live edge, the queue
+  guard and the per-packet arrival timing. The player uses it on the main thread and the
+  worker uses it per track.
+- `StreamDataEvent.wireBytes`: a frame's size on the wire when it differs from what the
+  event holds, for bandwidth accounting of header-only frames.
+
 ## 0.1.28
 
 ### Fixed

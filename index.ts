@@ -20,6 +20,16 @@ export { LiveVideoPlayer, createPlayer } from './player/live-player';
 export type { PlayerConfig, PlayerStats, PlayerState, BandwidthStats } from './player/live-player';
 
 export { FileVideoPlayer, createFilePlayer } from './player/file-player';
+export { VideoFeed } from './player/video-feed';
+export type { IVideoFeed, VideoFeedCallbacks, VideoFeedConfig, VideoMetadata } from './player/video-feed';
+
+// Pipeline worker: the MoQ session and the video decoders off the main thread
+export { PipelineClient, WorkerStreamSource } from './worker/pipeline-client';
+export type { PipelineClientEvents, PipelineWorkerLike, VideoTrackHandlers } from './worker/pipeline-client';
+export type {
+  PipelineConnectConfig, PipelineStreamType, PipelineTrack, TrackStats, VideoTrackSettings,
+  FromWorkerMessage, ToWorkerMessage,
+} from './worker/pipeline-protocol';
 export type { FilePlayerConfig, FilePlayerState, FilePlayerStats, FilePlayMode } from './player/file-player';
 
 // Stream sources
