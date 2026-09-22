@@ -2,9 +2,15 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.1.28
 
 ### Fixed
+
+- **Memory no longer grows for the life of a MoQ subscription.** `@moq/net` retained
+  about 1 KB of promises per frame received, and a copy of every transport chunk, so a
+  long session on a low-end device stalled on ever-longer garbage collections.
+  stinky-moq-js 0.2.2 ships a patched `@moq/net` and logs its build on load
+  (`stinky-moq-js 0.2.2 (built ...)`), which is how to tell a page runs the fixed code.
 
 - **A slow decoder start no longer trips the queue guard.** Until a decoder has produced
   its first frame it is initialising, so a full queue is accepted rather than dropped or
