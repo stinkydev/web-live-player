@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **A publisher restart no longer leaves the player dropping frames.** When Sesame is
+  stopped and started again the stream's timestamps start over, but the frame scheduler
+  kept the real-time-to-stream-time mapping it had built for the old run. Against it every
+  new frame was hours late, so each render took the newest frame and dropped the rest: the
+  picture kept moving but the jitter buffer was gone, and any burst of frames turned into
+  drops for the rest of the session. The scheduler now treats a timestamp that steps
+  backwards, or jumps ahead by more than a second, as a new timeline: it drops what it has
+  buffered (reported to `onFrameDropped` with the new reason `'discontinuity'`) and
+  re-syncs from the next frame. `DropReason` is exported for callers that switch on the
+  reason.
+
 ## 0.1.28
 
 ### Fixed

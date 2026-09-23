@@ -46,7 +46,7 @@ export type { LiveAudioConfig } from './audio/live-audio-player';
 
 // Utilities
 export { FrameScheduler } from './scheduling/frame-scheduler';
-export type { FrameTiming, LatencyStats, SchedulerStatus, SchedulerConfig, PacketTimingEntry } from './scheduling/frame-scheduler';
+export type { FrameTiming, LatencyStats, SchedulerStatus, SchedulerConfig, PacketTimingEntry, DropReason } from './scheduling/frame-scheduler';
 
 // Capture - Media capture and streaming
 export * from './capture';

@@ -523,7 +523,7 @@ const scheduler = new FrameScheduler<VideoFrame>({   // SchedulerConfig<VideoFra
   driftCheckInterval: 150,       // dequeues between drift checks
   driftCorrectionThresholdMs: 30,
   logger: (msg) => {},
-  onFrameDropped: (frame, reason) => frame.close(),   // 'overflow' | 'skip'
+  onFrameDropped: (frame, reason) => frame.close(),   // DropReason
 });
 
 scheduler.enqueueFrame(frame, timestampUs, arrivalTime, decodeTime, isKeyframe);
@@ -536,7 +536,11 @@ instead; `enqueueFrame` is the allocation-free variant. Also exposes
 `setBufferDelay()`, `getBufferDelay()`, `clear()`, `resetStats()` and `logStatus()`.
 
 **You must close dropped frames** in `onFrameDropped` - the scheduler never closes
-them itself. `clear()` reports every buffered frame through the same callback.
+them itself. `clear()` reports every buffered frame through the same callback. The
+reason is `'overflow'` (buffer full), `'skip'` (playback fell behind) or
+`'discontinuity'` (the stream timestamps stepped backwards or jumped ahead by more
+than a second, as when the publisher restarts: the buffer and sync point are
+dropped so playback re-syncs to the new timeline).
 
 ## Capture and Publishing
 

@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { FrameScheduler, FrameTiming } from './frame-scheduler';
+import { FrameScheduler, FrameTiming, DropReason } from './frame-scheduler';
 
 // Mock frame type for testing
 interface MockFrame {
@@ -32,7 +32,7 @@ function createTiming(arrivalOffset: number = 0, decodeOffset: number = 5): Fram
 
 describe('FrameScheduler', () => {
   let scheduler: FrameScheduler<MockFrame>;
-  let droppedFrames: { frame: MockFrame; reason: 'overflow' | 'skip' }[];
+  let droppedFrames: { frame: MockFrame; reason: DropReason }[];
   
   beforeEach(() => {
     droppedFrames = [];
@@ -228,6 +228,108 @@ describe('FrameScheduler', () => {
     });
   });
   
+  describe('Timestamp Discontinuity', () => {
+    /**
+     * Drive a 50 fps stream through a 60 Hz render loop for `ms` of simulated time,
+     * with `burst` frames arriving together. Returns how many frames were dropped.
+     */
+    function play(ms: number, streamUs: { value: number }, real: { value: number }, burst: number): number {
+      const before = droppedFrames.length;
+      let nextBurstAt = real.value;
+      const end = real.value + ms;
+      let id = 1000;
+      while (real.value < end) {
+        while (nextBurstAt <= real.value) {
+          for (let i = 0; i < burst; i++) {
+            scheduler.enqueueFrame(createMockFrame(id++), streamUs.value, real.value, real.value + 5, false);
+            streamUs.value += 20000;
+          }
+          nextBurstAt += burst * 20;
+        }
+        scheduler.dequeue(real.value);
+        real.value += 1000 / 60;
+      }
+      return droppedFrames.length - before;
+    }
+
+    /** Keep rendering for `ms` with no frames arriving, as during a publisher outage */
+    function drain(ms: number, real: { value: number }): void {
+      const end = real.value + ms;
+      while (real.value < end) {
+        scheduler.dequeue(real.value);
+        real.value += 1000 / 60;
+      }
+    }
+
+    beforeEach(() => {
+      scheduler = new FrameScheduler<MockFrame>({
+        bufferDelayMs: 100,
+        onFrameDropped: (frame, reason) => {
+          frame.closed = true;
+          droppedFrames.push({ frame, reason });
+        },
+      });
+    });
+
+    it('should drop the buffered frames when timestamps step backwards', () => {
+      for (let i = 0; i < 5; i++) {
+        scheduler.enqueue(createMockFrame(i), 3_600_000_000 + i * 20000, createTiming());
+      }
+      scheduler.dequeue(performance.now());
+      const buffered = scheduler.getStatus().currentBufferSize;
+
+      scheduler.enqueue(createMockFrame(99), 0, createTiming());
+
+      expect(droppedFrames.length).toBe(buffered);
+      expect(droppedFrames.every(d => d.reason === 'discontinuity')).toBe(true);
+      expect(droppedFrames.every(d => d.frame.closed)).toBe(true);
+      expect(scheduler.getStatus().currentBufferSize).toBe(1);
+    });
+
+    it('should keep the buffer full after the publisher restarts from zero', () => {
+      const stream = { value: 3_600_000_000 };
+      const real = { value: 0 };
+      expect(play(5000, stream, real, 3)).toBe(0);
+
+      // Publisher down for two seconds, then back with timestamps from zero
+      drain(2000, real);
+      stream.value = 0;
+      play(1000, stream, real, 3);
+      expect(droppedFrames.filter(d => d.reason === 'discontinuity').length).toBe(0);
+
+      const dropsBefore = droppedFrames.length;
+      play(10000, stream, real, 3);
+      expect(droppedFrames.length - dropsBefore).toBe(0);
+      expect(scheduler.getStatus().currentBufferMs).toBeGreaterThanOrEqual(60);
+    });
+
+    it('should re-sync when timestamps jump ahead by more than a second', () => {
+      const stream = { value: 0 };
+      const real = { value: 0 };
+      play(2000, stream, real, 1);
+
+      stream.value += 3_600_000_000;
+      play(1000, stream, real, 1);
+      const dropsBefore = droppedFrames.length;
+
+      play(2000, stream, real, 1);
+      expect(droppedFrames.length - dropsBefore).toBe(0);
+      expect(scheduler.getStatus().currentBufferSize).toBeGreaterThan(0);
+      expect(scheduler.getStatus().totalDequeuedFrames).toBeGreaterThan(200);
+    });
+
+    it('should not re-sync on a gap shorter than a second', () => {
+      for (let i = 0; i < 5; i++) {
+        scheduler.enqueue(createMockFrame(i), i * 20000, createTiming());
+      }
+      scheduler.dequeue(performance.now());
+
+      scheduler.enqueue(createMockFrame(99), 5 * 20000 + 500_000, createTiming());
+
+      expect(droppedFrames.filter(d => d.reason === 'discontinuity').length).toBe(0);
+    });
+  });
+
   describe('Clear and Reset', () => {
     it('should clear all frames and reset sync', () => {
       for (let i = 0; i < 5; i++) {

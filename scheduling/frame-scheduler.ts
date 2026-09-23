@@ -80,6 +80,9 @@ interface QueuedFrame<T> {
   packetSeq: number;
 }
 
+/** Why a buffered frame was dropped instead of shown */
+export type DropReason = 'overflow' | 'skip' | 'discontinuity';
+
 export interface SchedulerConfig<T> {
   /** Target buffer delay in milliseconds (0 = bypass mode, always return latest) */
   bufferDelayMs?: number;
@@ -92,12 +95,17 @@ export interface SchedulerConfig<T> {
   /** Logger function */
   logger?: (message: string) => void;
   /** Callback when frame is dropped */
-  onFrameDropped?: (frame: T, reason: 'overflow' | 'skip') => void;
+  onFrameDropped?: (frame: T, reason: DropReason) => void;
 }
 
 const PACKET_HISTORY_SIZE = 300;   // ~5 seconds at 60fps
 const LATENCY_HISTORY_SIZE = 60;   // ~1 second at 60fps
 const BUFFER_HISTORY_SIZE = 100;
+/**
+ * A timestamp step beyond this, or any step backwards, is a new timeline rather than a
+ * gap in the current one. Longer gaps are far rarer than publisher restarts.
+ */
+const DISCONTINUITY_US = 1_000_000;
 
 /**
  * FrameScheduler - Simplified implementation
@@ -109,6 +117,8 @@ const BUFFER_HISTORY_SIZE = 100;
  *    - Find frame with timestamp <= expectedStreamTime
  *    - Drop old frames, return best match
  * 3. Periodically adjust start point to correct drift
+ * 4. When the stream timestamps jump (the publisher restarted), drop the buffer and
+ *    the start point so the next dequeue re-syncs to the new timeline
  *
  * All per-frame state lives in preallocated ring buffers so the steady-state
  * enqueue/dequeue path allocates nothing.
@@ -165,7 +175,7 @@ export class FrameScheduler<T> {
   };
 
   private logger: (msg: string) => void;
-  private onFrameDropped?: (frame: T, reason: 'overflow' | 'skip') => void;
+  private onFrameDropped?: (frame: T, reason: DropReason) => void;
 
   constructor(config: SchedulerConfig<T> = {}) {
     this.bufferDelayMs = config.bufferDelayMs ?? 100; // Default 100ms buffer
@@ -263,10 +273,18 @@ export class FrameScheduler<T> {
       this.packetCount++;
     }
 
-    // Update frame duration estimate
     if (this.lastFrameTimestamp !== null) {
       const delta = timestampUs - this.lastFrameTimestamp;
-      if (delta > 0 && delta < 100_000) { // Sanity check: 10fps-1000fps
+
+      // A step backwards or a jump ahead means a new timeline: the publisher restarted.
+      // The sync point maps real time onto the old one, so against it every new frame
+      // is hours late (or early) and the buffer never refills. Buffered frames belong
+      // to the old timeline too and would break the sort order.
+      if (delta < 0 || delta > DISCONTINUITY_US) {
+        this.logger(`Timestamp discontinuity: ${Math.round(delta / 1000)}ms, re-syncing`);
+        this.dropFrames(this.size, 'discontinuity');
+        this.resetSync();
+      } else if (delta > 0 && delta < 100_000) { // Sanity check: 10fps-1000fps
         this.frameDurationUs = delta;
       }
     }
@@ -452,7 +470,7 @@ export class FrameScheduler<T> {
   }
 
   /** Drop N frames from front of buffer */
-  private dropFrames(count: number, reason: 'overflow' | 'skip'): void {
+  private dropFrames(count: number, reason: DropReason): void {
     for (let i = 0; i < count && this.size > 0; i++) {
       const slot = this.ring[this.head];
       const packetIndex = slot.packetIndex;
@@ -511,6 +529,13 @@ export class FrameScheduler<T> {
     }
   }
 
+  /** Forget the sync point and drift window so the next dequeue starts afresh */
+  private resetSync(): void {
+    this.startRealTimeUs = null;
+    this.startStreamTimeUs = null;
+    this.resetBufferSizeHistory();
+  }
+
   /** Clear buffer */
   clear(): void {
     while (this.size > 0) {
@@ -521,9 +546,7 @@ export class FrameScheduler<T> {
     }
     this.head = 0;
     this.size = 0;
-    this.startRealTimeUs = null;
-    this.startStreamTimeUs = null;
-    this.resetBufferSizeHistory();
+    this.resetSync();
   }
 
   /** Set buffer delay in milliseconds */
