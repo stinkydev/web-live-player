@@ -24,6 +24,15 @@
  * dropping audio - rather than broken playback. Network lateness never raises it.
  */
 
+import type { AudioOutputStats } from '../audio/clocked-audio-output';
+
+/** Audio playing on a clock, as the video players on it see it */
+export interface ClockAudio {
+  /** Stream timestamp being heard at `perfMs` (default: now), in µs, or null while nothing is */
+  audiblePtsAt(perfMs?: number): number | null;
+  getStats(): AudioOutputStats;
+}
+
 export interface LiveClockConfig {
   /** Delay behind the earliest-arriving packets, in milliseconds (default: 150) */
   bufferDelayMs?: number;
@@ -120,6 +129,9 @@ export class LiveClock {
   private minimumDelays = new Map<string, number>();
   private floorMs = 0;
 
+  // Audio playing on the clock, in the order it came
+  private audios = new Set<ClockAudio>();
+
   constructor(config: LiveClockConfig = {}) {
     this.bufferDelayMs = Math.max(0, config.bufferDelayMs ?? DEFAULT_BUFFER_DELAY_MS);
     this.maxRateAdjust = Math.max(0, config.maxRateAdjust ?? 0.01);
@@ -159,6 +171,26 @@ export class LiveClock {
   /** Drop a player's minimum (it has gone). */
   clearMinimumDelay(key: string): void {
     if (this.minimumDelays.delete(key)) this.refreshFloor();
+  }
+
+  /**
+   * Make audio playing on the clock known, so that a video player on it without audio of its
+   * own measures A/V sync against it and reports its stats. A LiveAudioPlayer does this itself.
+   */
+  addAudio(audio: ClockAudio): void {
+    this.audios.add(audio);
+  }
+
+  /** Forget audio that has gone. */
+  removeAudio(audio: ClockAudio): void {
+    this.audios.delete(audio);
+  }
+
+  /** The audio playing on the clock - the latest to come, if more than one - or null */
+  getAudio(): ClockAudio | null {
+    let latest: ClockAudio | null = null;
+    for (const audio of this.audios) latest = audio;
+    return latest;
   }
 
   private refreshFloor(): void {

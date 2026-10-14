@@ -27,6 +27,10 @@ All notable changes to this project are documented here.
 - **`MediaCapture` drop counts carry over a stop and a start**, like its other counters.
 - **MP4 duration follows the edit list**, so a file with a leading empty edit plays to its end
   and loops at the right point.
+- **A video player sees audio played separately on its clock.** It knew only audio of its own, so
+  with a separate `LiveAudioPlayer` on its clock (elmo's live audio) `SyncStats.audio` and
+  `avSyncMs` were null and the stats overlay showed no audio. A `LiveAudioPlayer` now makes
+  itself known to its clock, and a video player without audio of its own uses that.
 
 ### Changed
 
@@ -36,6 +40,7 @@ All notable changes to this project are documented here.
 ### Added
 
 - `presentationDurationS()`, the edit list's presentation duration.
+- `LiveClock.addAudio()` / `removeAudio()` / `getAudio()` and the `ClockAudio` type.
 
 ## 0.2.0
 

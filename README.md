@@ -418,8 +418,9 @@ second of frames.
 `SyncStats` holds `clockRunning`, `clockRate` (1 = real time), `clockErrorMs` and
 `clockJumps`; `avSyncMs`, the middle of the frame on screen minus the audio being heard
 (about 0 when in sync, each reading within half a frame; null without audio); `lateFrames`,
-frames that finished decoding after their time; and `audio`, the audio player's
-`LiveAudioStats`.
+frames that finished decoding after their time; and `audio`, the `LiveAudioStats` of the
+player's audio - or, without audio of its own, of a `LiveAudioPlayer` on its clock, which
+`avSyncMs` is then measured against.
 
 `PacketTimingEntry` (from `getPacketTimingHistory()`) holds `arrivalTime`,
 `intervalMs`, `streamTimestampUs`, `isKeyframe`, `decodeLatencyMs`, `latenessMs` (how much
@@ -610,7 +611,9 @@ const due = clock.ptsAt(performance.now());                 // µs, or null befo
 Also `targetAt(timeMs)` (where the clock is heading, available from the first packet),
 `setBufferDelay(ms)` (applied at once), `getBufferDelay()`, `reset()`, `isRunning`, `rate` and
 `getStats(): LiveClockStats`. Each track reports under a key of its own; the key is how a
-timestamp discontinuity on one track is told apart from the others.
+timestamp discontinuity on one track is told apart from the others. A `LiveAudioPlayer` makes
+itself known to its clock (`addAudio()`, `removeAudio()`, `getAudio()`), so that a video
+player on the same clock without audio of its own measures A/V sync against it.
 
 ### `VideoFrameQueue<T>` / `PlaybackStats`
 

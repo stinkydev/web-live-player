@@ -52,7 +52,7 @@ export type { LiveAudioConfig, LiveAudioStats, LiveAudioState } from './audio/li
 // Synchronization
 export { LiveClock, DEFAULT_BUFFER_DELAY_MS } from './sync/live-clock';
 export { MediaClock } from './sync/media-clock';
-export type { LiveClockConfig, LiveClockStats } from './sync/live-clock';
+export type { LiveClockConfig, LiveClockStats, ClockAudio } from './sync/live-clock';
 
 // Utilities
 export { VideoFrameQueue } from './scheduling/video-frame-queue';

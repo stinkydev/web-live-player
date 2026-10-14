@@ -202,6 +202,21 @@ describe('LiveClock', () => {
     expect(clock.getEffectiveDelay()).toBe(45);
   });
 
+  it('knows the audio playing on it, the latest if more than one', () => {
+    const clock = new LiveClock();
+    const audio = () => ({ audiblePtsAt: () => null, getStats: () => ({}) as any });
+    const first = audio();
+    const second = audio();
+    expect(clock.getAudio()).toBeNull();
+    clock.addAudio(first);
+    clock.addAudio(second);
+    expect(clock.getAudio()).toBe(second);
+    clock.removeAudio(second);
+    expect(clock.getAudio()).toBe(first);
+    clock.removeAudio(first);
+    expect(clock.getAudio()).toBeNull();
+  });
+
   it('re-syncs when the publisher restarts its timestamps', () => {
     const time = fakeTime();
     const clock = new LiveClock({ bufferDelayMs: 150, now: time.now });

@@ -5,7 +5,8 @@
  * same clock. Given no clock, it makes its own. The decoding and the playout keeping to the clock
  * are ClockedAudioOutput's; this adds what live streams need: the packets' arrival reported to
  * the clock, decoder setup from the stream's codec data, and the output's latency reported to the
- * clock as the least delay it can play at.
+ * clock as the least delay it can play at. It makes itself known to the clock, so that a video
+ * player on it measures A/V sync against it.
  */
 
 import { CodecType, IMediaCodecData, ParsedFrame } from '@stinkycomputing/sesame-api-client';
@@ -48,6 +49,7 @@ export class LiveAudioPlayer {
       now: this.now,
       name: 'LiveAudioPlayer',
     });
+    this.clock.addAudio(this);
   }
 
   /** The clock the player follows */
@@ -159,6 +161,7 @@ export class LiveAudioPlayer {
 
   dispose(): void {
     this.clock.clearMinimumDelay(this.trackKey);
+    this.clock.removeAudio(this);
     this.output.dispose();
   }
 }

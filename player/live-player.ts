@@ -16,7 +16,7 @@ import { WebCodecsDecoder } from '../decoders/webcodecs-decoder';
 import { WasmDecoder, YUVFrame } from '../decoders/wasm-decoder';
 import { VideoFrameQueue, FrameDropReason } from '../scheduling/video-frame-queue';
 import { PlaybackStats, LatencyStats } from '../scheduling/playback-stats';
-import { LiveClock, DEFAULT_BUFFER_DELAY_MS } from '../sync/live-clock';
+import { LiveClock, DEFAULT_BUFFER_DELAY_MS, type ClockAudio } from '../sync/live-clock';
 import { codecDataChanged, rescaleTime, timebaseFromCodecData, MICROSECOND_TIMEBASE, Timebase } from '../protocol/codec-utils';
 import { LiveAudioPlayer, LiveAudioStats } from '../audio/live-audio-player';
 import { BasePlayer } from './base-player';
@@ -130,7 +130,10 @@ export interface SyncStats {
   videoMinimumDelayMs: number;
   /** How far ahead of the getVideoFrame() call frames are picked, in ms */
   displayLeadMs: number;
-  /** The audio player's own statistics; null without audio */
+  /**
+   * The statistics of the player's audio - or, without audio of its own, of a LiveAudioPlayer on
+   * its clock; null without either
+   */
   audio: LiveAudioStats | null;
 }
 
@@ -551,9 +554,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     return this.config.displayLatencyMs ?? 1.5 * this.renderIntervalMs;
   }
 
+  /** The audio to keep sync with: the player's own, or what else plays on its clock (elmo's way) */
+  private syncAudio(): ClockAudio | null {
+    return this.audioPlayer ?? this.clock.getAudio();
+  }
+
   /** Compare a frame going on screen at `atMs` with the audio heard then. */
   private measureSync(frameTimestampUs: number, atMs: number): void {
-    const heard = this.audioPlayer?.audiblePtsAt(atMs) ?? null;
+    const heard = this.syncAudio()?.audiblePtsAt(atMs) ?? null;
     if (heard === null) return;
     const halfFrameUs = 500_000 / (this.estimatedFrameRate || 30);
     const offsetMs = (frameTimestampUs + halfFrameUs - heard) / 1000;
@@ -686,7 +694,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         minimumDelayMs: clockStats.minimumDelayMs,
         videoMinimumDelayMs: this.videoMinimumDelayMs,
         displayLeadMs: Math.round(this.displayLeadMs() * 10) / 10,
-        audio: this.audioPlayer?.getStats() ?? null,
+        audio: this.syncAudio()?.getStats() ?? null,
       },
     };
   }
