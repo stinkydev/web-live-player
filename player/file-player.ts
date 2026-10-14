@@ -1,13 +1,20 @@
 /**
  * File Video Player
- * 
- * Handles playback of MP4 files with seeking, play/pause, and frame timing.
- * Uses mp4box for demuxing and WebCodecs for decoding.
+ *
+ * Plays MP4 files with seeking, play/pause and looping. mp4box demuxes, WebCodecs decodes.
+ *
+ * Timing: a MediaClock holds the playback position - running while playing, held while paused.
+ * getVideoFrame() hands out the frame due at it, and the audio keeps to it the way live audio
+ * keeps to a LiveClock: placed by its timestamps and heard when due, the audio device's drift
+ * taken out. Looping carries the timeline on (the next pass's samples are fed with the file's
+ * duration added), so a loop is as seamless as the middle of the file.
  */
 
 import { MP4FileSource, MP4FileInfo, DecodableSample } from '../sources/mp4-file-source';
 import { WebCodecsDecoder } from '../decoders/webcodecs-decoder';
-import { FileAudioPlayer } from '../audio/file-audio-player';
+import { FileAudioPlayer, FileAudioStats } from '../audio/file-audio-player';
+import { MediaClock } from '../sync/media-clock';
+import { VideoFrameQueue } from '../scheduling/video-frame-queue';
 import type { PreferredDecoder } from '../types';
 import { BasePlayer } from './base-player';
 
@@ -25,6 +32,8 @@ export interface FilePlayerConfig {
   enableAudio?: boolean;
   /** Audio context to use (creates one if not provided) */
   audioContext?: AudioContext;
+  /** Node the audio goes to (default: the context's destination) */
+  audioDestination?: AudioNode;
   /** Enable debug logging */
   debugLogging?: boolean;
   /** Play mode: 'once' plays to end, 'loop' seamlessly loops (default: 'once') */
@@ -35,6 +44,13 @@ export interface FilePlayerConfig {
    * bounds how much the decoder may run ahead.
    */
   maxBufferedFrames?: number;
+  /**
+   * How far ahead of the getVideoFrame() call to pick the frame, in ms. By default 1.5 render
+   * intervals, measured from how often getVideoFrame() is called: a frame drawn now is on screen
+   * from the next refresh, for one refresh. Set a number for a display pipeline with more
+   * latency, or 0 to pick for the moment of the call.
+   */
+  displayLatencyMs?: number;
   /** @deprecated Use playMode instead */
   loop?: boolean;
 }
@@ -56,6 +72,8 @@ export interface FilePlayerStats {
   frameRate: number;
   codec: string;
   state: FilePlayerState;
+  /** The audio player's statistics; null without audio */
+  audio: FileAudioStats | null;
 }
 
 /**
@@ -65,106 +83,107 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
-/**
- * Decoded frame with timing info
- */
-interface TimedFrame {
-  frame: VideoFrame;
-  timestampMs: number;  // Presentation time in milliseconds
-  durationMs: number;   // Frame duration in milliseconds
-}
+/** Audio is decoded this far ahead of the playback position (the worklet's ring holds 2.7 s) */
+const AUDIO_AHEAD_US = 1_500_000;
+/** Chunks the video decoder may hold; WebCodecsDecoder drops delta frames beyond 10 */
+const MAX_DECODER_QUEUE = 8;
+/** Feeding runs this often besides render calls, so audio keeps going in a background tab */
+const PUMP_INTERVAL_MS = 100;
+/** Video this far behind the position is skipped to the keyframe before the position */
+const CATCH_UP_US = 1_000_000;
+/** Weight of the newest sample in the render interval average */
+const RENDER_SMOOTHING = 0.1;
 
 /**
  * File Video Player
  */
 export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   private config: FilePlayerConfig;
-  
+
   // Source and decoder
   private fileSource: MP4FileSource | null = null;
   private decoder: WebCodecsDecoder | null = null;
-  
+  private fileInfo: MP4FileInfo | null = null;
+
   // Audio
   private audioContext: AudioContext | null = null;
   private audioPlayer: FileAudioPlayer | null = null;
   private ownsAudioContext: boolean = false;
-  private audioInitialized: boolean = false;
   private volume: number = 1;
-  
-  // File info
-  private fileInfo: MP4FileInfo | null = null;
-  
-  // Frame buffer - sorted by timestamp
-  private frameBuffer: TimedFrame[] = [];
-  private minBufferSize: number = 3; // Minimum frames before starting playback (100ms at 30fps)
-  private maxFrameBuffer: number;    // Upper bound on decoded frames held ahead of playback
-  
-  // Sample queues - video and audio samples waiting to be decoded
-  private sampleQueue: DecodableSample[] = [];
-  private audioSampleQueue: DecodableSample[] = [];
-  private nextSampleIndex: number = 0;
-  private nextAudioSampleIndex: number = 0;
-  private maxDecoderQueue: number = 10; // Max chunks to keep in decoder queue
-  
-  // Buffer ready promise - resolves when enough frames are buffered
-  private bufferReadyResolve: (() => void) | null = null;
-  
-  // Playback state
-  private playStartTime: number = 0;      // performance.now() when play started
-  private playStartPosition: number = 0;  // Video position when play started (ms)
-  private currentPosition: number = 0;    // Current position in video (ms)
+
+  // Timeline
+  private readonly clock = new MediaClock();
+  private durationUs = 0;
+  private lastLoop = 0;
+
+  // Encoded samples of the whole file, kept for seeking and looping
+  private videoSamples: DecodableSample[] = [];
+  private audioSamples: DecodableSample[] = [];
+  // Next sample to feed, and the pass of the file it belongs to (its timestamps move on by a duration a pass)
+  private nextVideo = 0;
+  private videoPass = 0;
+  private nextAudio = 0;
+  private audioPass = 0;
+
+  // Decoded frames
+  private frameQueue: VideoFrameQueue<VideoFrame>;
+  private maxFrameBuffer: number;
   private lastVideoFrame: VideoFrame | null = null;
-  
-  // Seeking state
-  private isSeeking: boolean = false;
-  
+  private renderIntervalMs = 1000 / 60;
+  private lastRenderCall = -1;
+
+  private pumpTimer: ReturnType<typeof setInterval> | null = null;
+  private firstFrameResolve: (() => void) | null = null;
+
   constructor(config: FilePlayerConfig = {}) {
     super('idle', config.debugLogging ?? false);
-    
+
     // Handle deprecated loop option
     const playMode = config.playMode ?? (config.loop ? 'loop' : 'once');
-    
+
     this.config = {
       preferredDecoder: config.preferredDecoder ?? 'webcodecs-sw',
       enableAudio: config.enableAudio ?? true, // Audio on by default
+      audioDestination: config.audioDestination,
+      displayLatencyMs: config.displayLatencyMs,
       debugLogging: config.debugLogging ?? false,
       playMode,
       maxBufferedFrames: config.maxBufferedFrames ?? 60,
     };
 
-    this.maxFrameBuffer = Math.max(this.minBufferSize, this.config.maxBufferedFrames!);
+    this.maxFrameBuffer = Math.max(3, this.config.maxBufferedFrames!);
+    this.frameQueue = new VideoFrameQueue<VideoFrame>({
+      capacity: this.maxFrameBuffer + MAX_DECODER_QUEUE,
+      onDrop: (frame) => frame.close(),
+    });
 
-    // Handle audio context
     if (config.audioContext) {
       this.audioContext = config.audioContext;
       this.ownsAudioContext = false;
-    } else if (this.config.enableAudio) {
-      this.audioContext = new AudioContext();
-      this.ownsAudioContext = true;
     }
   }
-  
+
   /**
    * Get file info
    */
   getFileInfo(): MP4FileInfo | null {
     return this.fileInfo;
   }
-  
+
   /**
    * Get current position in seconds
    */
   getPosition(): number {
-    return this.currentPosition / 1000;
+    return this.mediaPositionUs(this.clock.ptsAt()) / 1_000_000;
   }
-  
+
   /**
    * Get duration in seconds
    */
   getDuration(): number {
     return this.fileInfo?.duration ?? 0;
   }
-  
+
   /**
    * Get player statistics
    */
@@ -172,15 +191,16 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
     return {
       duration: this.getDuration(),
       position: this.getPosition(),
-      bufferSize: this.frameBuffer.length,
+      bufferSize: this.frameQueue.size,
       width: this.fileInfo?.width ?? 0,
       height: this.fileInfo?.height ?? 0,
       frameRate: this.fileInfo?.frameRate ?? 0,
       codec: this.fileInfo?.videoCodec ?? '',
       state: this._state,
+      audio: this.audioPlayer?.getStats() ?? null,
     };
   }
-  
+
   /**
    * Set play mode ('once' or 'loop')
    */
@@ -188,14 +208,14 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
     this.config.playMode = mode;
     this.logger.debug(`Play mode set to: ${mode}`);
   }
-  
+
   /**
    * Get current play mode
    */
   getPlayMode(): FilePlayMode {
     return this.config.playMode ?? 'once';
   }
-  
+
   /**
    * Set looping (convenience method, equivalent to setPlayMode)
    * @deprecated Use setPlayMode instead
@@ -203,7 +223,7 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   setLoop(loop: boolean): void {
     this.config.playMode = loop ? 'loop' : 'once';
   }
-  
+
   /**
    * Enable/disable debug logging
    */
@@ -229,23 +249,33 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   getVolume(): number {
     return this.volume;
   }
-  
+
   /**
    * Load a video file from URL
    */
   async loadFromUrl(url: string): Promise<MP4FileInfo> {
+    return this.load((source) => source.loadFromUrl(url));
+  }
+
+  /**
+   * Load a video file from File object
+   */
+  async loadFromFile(file: File): Promise<MP4FileInfo> {
+    return this.load((source) => source.loadFromFile(file));
+  }
+
+  private async load(open: (source: MP4FileSource) => Promise<MP4FileInfo>): Promise<MP4FileInfo> {
     this.setState('loading');
-    
+
     try {
       this.dispose();
-      
+      this.setState('loading');
+
       this.fileSource = new MP4FileSource({
         onReady: (info) => {
           this.logger.info(`File loaded: ${info.width}x${info.height} @ ${info.frameRate?.toFixed(1)}fps, codec: ${info.videoCodec}`);
         },
-        onSamples: (samples) => {
-          this.handleSamples(samples);
-        },
+        onSamples: (samples) => this.handleSamples(samples),
         onError: (error) => {
           this.logger.error(`File source error: ${error.message}`);
           this.setState('error');
@@ -254,22 +284,20 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
         onProgress: (loaded, total) => {
           this.emit('progress', loaded, total);
         },
-        onEnded: () => {
-          this.handleSourceEnded();
-        },
       });
-      
-      this.fileInfo = await this.fileSource.loadFromUrl(url);
-      
-      // Initialize decoder
-      await this.initDecoder();
-      
-      // Wait for initial buffer to fill
-      await this.waitForBuffer();
-      
+
+      this.fileInfo = await open(this.fileSource);
+      this.durationUs = this.fileInfo.duration * 1_000_000;
+
+      await this.initDecoders();
+      this.startPump();
+
+      // Ready once the first picture has decoded
+      await this.waitForFirstFrame();
+
       this.setState('ready');
       this.emit('ready', this.fileInfo);
-      
+
       return this.fileInfo;
     } catch (error) {
       this.setState('error');
@@ -277,362 +305,269 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
       throw error;
     }
   }
-  
+
   /**
-   * Load a video file from File object
+   * Initialize the video decoder, and the audio player if the file has audio
    */
-  async loadFromFile(file: File): Promise<MP4FileInfo> {
-    this.setState('loading');
-    
-    try {
-      this.dispose();
-      
-      this.fileSource = new MP4FileSource({
-        onReady: (info) => {
-          this.logger.info(`File loaded: ${info.width}x${info.height} @ ${info.frameRate?.toFixed(1)}fps, codec: ${info.videoCodec}`);
-        },
-        onSamples: (samples) => {
-          this.handleSamples(samples);
-        },
-        onError: (error) => {
-          this.logger.error(`File source error: ${error.message}`);
-          this.setState('error');
-          this.emit('error', error);
-        },
-        onEnded: () => {
-          this.handleSourceEnded();
-        },
-      });
-      
-      this.fileInfo = await this.fileSource.loadFromFile(file);
-      
-      this.logger.debug(`File info loaded: ${this.fileInfo.width}x${this.fileInfo.height}, ${this.fileInfo.videoCodec}`);
-      
-      // Initialize decoder
-      await this.initDecoder();
-      
-      this.logger.debug(`Decoder initialized, sample queue: ${this.sampleQueue.length}`);
-      
-      // Wait for initial buffer to fill
-      await this.waitForBuffer();
-      
-      this.setState('ready');
-      this.emit('ready', this.fileInfo);
-      
-      return this.fileInfo;
-    } catch (error) {
-      this.setState('error');
-      this.emit('error', toError(error));
-      throw error;
-    }
-  }
-  
-  /**
-   * Initialize the video decoder
-   */
-  private async initDecoder(): Promise<void> {
+  private async initDecoders(): Promise<void> {
     if (!this.fileInfo || !this.fileSource) {
       throw new Error('File not loaded');
     }
-    
+
     this.decoder = new WebCodecsDecoder({
       preferHardware: this.config.preferredDecoder === 'webcodecs-hw',
-      onFrame: (frame) => {
-        this.handleDecodedFrame(frame);
-      },
+      onFrame: (frame) => this.handleDecodedFrame(frame),
       onError: (error) => {
         this.logger.error(`Decoder error: ${error.message}`);
         this.emit('error', error);
       },
     });
-    
+
     const description = this.fileSource.getVideoDescription();
-    
-    this.logger.debug(`Video description: ${description?.length ?? 0} bytes`);
-    
     await this.decoder.configure({
       codec: this.fileInfo.videoCodec,
       codedWidth: this.fileInfo.width,
       codedHeight: this.fileInfo.height,
       description: description ?? undefined,
     });
-    
     this.logger.info(`Decoder configured: ${this.fileInfo.videoCodec}`);
-    
-    // Initialize audio decoder if enabled and audio track exists
-    if (this.config.enableAudio && this.audioContext && this.fileInfo.audioCodec) {
-      await this.initAudioDecoder();
+
+    if (this.config.enableAudio && this.fileInfo.audioCodec) {
+      await this.initAudio();
     }
-    
-    // Start feeding samples to decoders (samples may have arrived during config)
-    this.feedDecoder();
-    this.feedAudioDecoder();
+
+    this.feed();
   }
-  
-  /**
-   * Initialize the audio decoder
-   */
-  private async initAudioDecoder(): Promise<void> {
-    if (!this.fileInfo || !this.fileSource || !this.audioContext) {
-      return;
-    }
-    
+
+  private async initAudio(): Promise<void> {
+    if (!this.fileInfo || !this.fileSource) return;
+
     try {
-      this.audioPlayer = new FileAudioPlayer(this.audioContext);
-      
-      const audioDescription = this.fileSource.getAudioDescription();
-      
-      await this.audioPlayer.init(
+      if (!this.audioContext) {
+        this.audioContext = new AudioContext();
+        this.ownsAudioContext = true;
+      }
+      const player = new FileAudioPlayer(this.audioContext, {
+        clock: this.clock,
+        destination: this.config.audioDestination,
+      });
+      await player.init(
         this.fileInfo.audioCodec!,
         this.fileInfo.audioSampleRate ?? 48000,
         this.fileInfo.audioChannels ?? 2,
-        audioDescription ?? undefined
+        this.fileSource.getAudioDescription() ?? undefined
       );
-
-      // Re-apply the caller's desired volume to the fresh audio player
-      this.audioPlayer.setVolume(this.volume);
-
-      this.audioInitialized = true;
+      player.setVolume(this.volume);
+      this.audioPlayer = player;
       this.logger.info(`Audio decoder configured: ${this.fileInfo.audioCodec}`);
-      
-      // Feed any samples that arrived during initialization
-      this.feedAudioDecoder();
     } catch (error) {
       this.logger.warn(`Failed to initialize audio: ${error}`);
       this.audioPlayer = null;
     }
   }
-  
+
   /**
-   * Wait for the frame buffer to have enough frames for smooth playback
+   * Resolve once the first frame has decoded. Times out after 5 seconds - with a hint when the
+   * moov atom sits at the end of the file - unless something decoded by then.
    */
-  private waitForBuffer(): Promise<void> {
-    // If buffer already has enough frames, resolve immediately
-    if (this.frameBuffer.length >= this.minBufferSize) {
-      return Promise.resolve();
-    }
-    
-    this.logger.debug(`Waiting for buffer (need ${this.minBufferSize} frames, have ${this.frameBuffer.length})`);
-    
-    // Otherwise, wait for frames to be decoded
+  private waitForFirstFrame(): Promise<void> {
+    if (this.frameQueue.size > 0) return Promise.resolve();
+
     return new Promise((resolve, reject) => {
-      this.bufferReadyResolve = resolve;
-      
-      // Timeout after 5 seconds
       const timeout = setTimeout(() => {
-        if (this.bufferReadyResolve) {
-          this.logger.warn(`Buffer timeout - have ${this.frameBuffer.length}/${this.minBufferSize} frames, ${this.sampleQueue.length} samples queued`);
-          // Resolve anyway if we have at least 1 frame
-          if (this.frameBuffer.length > 0) {
-            this.bufferReadyResolve = null;
-            resolve();
-          } else {
-            this.bufferReadyResolve = null;
-            // Check if moov atom is not at the start of the file
-            const moovWarning = this.fileInfo?.isMoovAtStart === false 
-              ? ' The moov atom is not at the start of the file - please re-encode with "faststart" option (e.g., ffmpeg -movflags +faststart).'
-              : '';
-            reject(new Error(`Timeout waiting for frames to decode.${moovWarning}`));
-          }
+        this.firstFrameResolve = null;
+        if (this.frameQueue.size > 0) {
+          resolve();
+          return;
         }
+        const moovWarning = this.fileInfo?.isMoovAtStart === false
+          ? ' The moov atom is not at the start of the file - please re-encode with "faststart" option (e.g., ffmpeg -movflags +faststart).'
+          : '';
+        reject(new Error(`Timeout waiting for frames to decode.${moovWarning}`));
       }, 5000);
-      
-      // Clear timeout if resolved normally
-      const originalResolve = this.bufferReadyResolve;
-      this.bufferReadyResolve = () => {
+
+      this.firstFrameResolve = () => {
         clearTimeout(timeout);
-        originalResolve();
+        this.firstFrameResolve = null;
+        resolve();
       };
     });
   }
-  
+
   /**
-   * Handle samples from mp4box - queue them for gradual decoding
+   * Keep the samples the source extracts: all of them are kept, for seeking and looping
    */
   private handleSamples(samples: DecodableSample[]): void {
-    const videoCount = samples.filter(s => s.type === 'video').length;
-    const audioCount = samples.filter(s => s.type === 'audio').length;
-    this.logger.debug(`Received ${videoCount} video + ${audioCount} audio samples`);
-    
-    // Queue video and audio samples separately
     for (const sample of samples) {
       if (sample.type === 'video') {
-        this.sampleQueue.push(sample);
-      } else if (sample.type === 'audio') {
-        this.audioSampleQueue.push(sample);
+        this.videoSamples.push(sample);
+      } else {
+        this.audioSamples.push(sample);
       }
     }
-    
-    // Start feeding samples to decoders
-    this.feedDecoder();
-    this.feedAudioDecoder();
+    this.feed();
   }
-  
-  /**
-   * Feed video samples to decoder gradually (don't overflow the queue)
-   *
-   * Stops once `maxFrameBuffer` decoded frames are waiting - decoded frames hold
-   * video memory, so the decoder must not run ahead of playback without bound.
-   * Draining in getVideoFrame() resumes feeding.
-   */
-  private feedDecoder(): void {
-    if (!this.decoder) return;
 
-    // Feed samples while decoder queue has room and the frame buffer isn't full
-    while (this.nextSampleIndex < this.sampleQueue.length &&
-           this.decoder.decodeQueueSize < this.maxDecoderQueue &&
-           this.frameBuffer.length < this.maxFrameBuffer) {
-      const sample = this.sampleQueue[this.nextSampleIndex];
-      this.decoder.decode({
+  /** Feeding runs on a timer too, so audio keeps coming in a background tab without renders */
+  private startPump(): void {
+    this.stopPump();
+    this.pumpTimer = setInterval(() => this.feed(), PUMP_INTERVAL_MS);
+  }
+
+  private stopPump(): void {
+    if (this.pumpTimer) clearInterval(this.pumpTimer);
+    this.pumpTimer = null;
+  }
+
+  /** Whether all of a track's samples are in hand, so its next pass can start */
+  private trackComplete(type: 'video' | 'audio'): boolean {
+    const counts = this.fileSource?.getSampleCounts();
+    if (!counts) return false;
+    return type === 'video'
+      ? this.videoSamples.length >= counts.video
+      : this.audioSamples.length >= counts.audio;
+  }
+
+  /**
+   * Hand the decoders what comes next: video while the frames held stay within bounds, audio
+   * up to AUDIO_AHEAD_US past the position. Advances the end of the file and the loop.
+   */
+  private feed(): void {
+    if (!this.fileInfo) return;
+    const position = this.clock.ptsAt();
+    this.feedVideo(position);
+    this.feedAudio(position);
+    this.checkEnd(position);
+  }
+
+  private feedVideo(position: number): void {
+    const decoder = this.decoder;
+    if (!decoder || decoder.state !== 'configured') return;
+    // Nothing is drawn in a background tab; it catches up from a keyframe on return
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+    this.skipVideoTo(position);
+
+    while (decoder.decodeQueueSize < MAX_DECODER_QUEUE &&
+           this.frameQueue.size + decoder.decodeQueueSize < this.maxFrameBuffer) {
+      if (this.nextVideo >= this.videoSamples.length) {
+        if (this.config.playMode !== 'loop' || !this.trackComplete('video') || this.videoSamples.length === 0) break;
+        this.nextVideo = 0;
+        this.videoPass++;
+      }
+      const sample = this.videoSamples[this.nextVideo++];
+      decoder.decode({
         data: sample.data,
-        timestamp: sample.timestamp,
+        timestamp: sample.timestamp + this.videoPass * this.durationUs,
         duration: sample.duration,
         isKeyframe: sample.isKeyframe,
       });
-      this.nextSampleIndex++;
     }
   }
-  
-  private maxAudioBufferMs = 2000; // Buffer 2 seconds of audio ahead
-  
+
   /**
-   * Feed audio samples to decoder - gradually based on playback position
+   * When the next video sample is far behind the position (back from a background tab, say),
+   * skip to the last keyframe at or before it rather than decode the way there
    */
-  private feedAudioDecoder(): void {
-    // Don't feed audio until the player is initialized
-    if (!this.audioPlayer || !this.audioInitialized) {
+  private skipVideoTo(position: number): void {
+    const offset = this.videoPass * this.durationUs;
+    const next = this.videoSamples[this.nextVideo];
+    if (!next || next.timestamp + offset >= position - CATCH_UP_US) return;
+
+    let keyframe = -1;
+    for (let i = this.nextVideo; i < this.videoSamples.length; i++) {
+      const s = this.videoSamples[i];
+      if (s.timestamp + offset > position) break;
+      if (s.isKeyframe) keyframe = i;
+    }
+    if (keyframe > this.nextVideo) {
+      this.nextVideo = keyframe;
+    }
+  }
+
+  private feedAudio(position: number): void {
+    const audio = this.audioPlayer;
+    if (!audio) return;
+
+    for (;;) {
+      if (this.nextAudio >= this.audioSamples.length) {
+        if (this.config.playMode !== 'loop' || !this.trackComplete('audio') || this.audioSamples.length === 0) break;
+        this.nextAudio = 0;
+        this.audioPass++;
+      }
+      const sample = this.audioSamples[this.nextAudio];
+      const timestamp = sample.timestamp + this.audioPass * this.durationUs;
+      if (timestamp > position + AUDIO_AHEAD_US) break;
+      this.nextAudio++;
+      // Audio already behind the position would only be dropped
+      if (timestamp + sample.duration < position) continue;
+      audio.decode(sample.data, timestamp, sample.duration);
+    }
+  }
+
+  /** The end of the file: stop there, or report the loop */
+  private checkEnd(position: number): void {
+    if (this._state !== 'playing' || this.durationUs <= 0) return;
+
+    if (this.config.playMode === 'loop') {
+      const loop = Math.floor(position / this.durationUs);
+      if (loop > this.lastLoop) {
+        this.lastLoop = loop;
+        this.emit('loop');
+      }
       return;
     }
-    
-    // Calculate target audio timestamp (current position + buffer)
-    const targetTimestampUs = (this.currentPosition + this.maxAudioBufferMs) * 1000;
-    
-    // Feed audio samples up to target timestamp
-    while (this.nextAudioSampleIndex < this.audioSampleQueue.length) {
-      const sample = this.audioSampleQueue[this.nextAudioSampleIndex];
-      
-      // Stop if we've buffered enough ahead
-      if (sample.timestamp > targetTimestampUs) {
-        break;
-      }
-      
-      this.audioPlayer.decode(sample.data, sample.timestamp, sample.duration);
-      this.nextAudioSampleIndex++;
+
+    if (position >= this.durationUs) {
+      this.clock.pause();
+      this.clock.seek(this.durationUs);
+      this.audioPlayer?.stop();
+      this.setState('ended');
+      this.emit('ended');
     }
   }
-  
+
+  /** Position within the file for a position on the timeline, which runs on across loops */
+  private mediaPositionUs(timelineUs: number): number {
+    if (this.durationUs <= 0) return 0;
+    if (this.config.playMode === 'loop') {
+      return timelineUs - Math.floor(timelineUs / this.durationUs) * this.durationUs;
+    }
+    return Math.max(0, Math.min(timelineUs, this.durationUs));
+  }
+
   /**
-   * Handle decoded frame from decoder
+   * Queue a decoded frame; frames the position has passed are let go, but for the newest of them
    */
   private handleDecodedFrame(frame: VideoFrame): void {
-    const timestampMs = (frame.timestamp ?? 0) / 1000;
-    const durationMs = (frame.duration ?? 0) / 1000;
-    
-    // Insert in sorted order by timestamp
-    const timedFrame: TimedFrame = { frame, timestampMs, durationMs };
-    
-    let inserted = false;
-    for (let i = 0; i < this.frameBuffer.length; i++) {
-      if (this.frameBuffer[i].timestampMs > timestampMs) {
-        this.frameBuffer.splice(i, 0, timedFrame);
-        inserted = true;
-        break;
-      }
-    }
-    
-    if (!inserted) {
-      this.frameBuffer.push(timedFrame);
-    }
-    
-    // Check if buffer is ready (resolve waitForBuffer promise)
-    if (this.bufferReadyResolve && this.frameBuffer.length >= this.minBufferSize) {
-      this.bufferReadyResolve();
-      this.bufferReadyResolve = null;
-    }
-    
-    // Feed more samples to keep the pipeline flowing
-    this.feedDecoder();
-    this.feedAudioDecoder();
-  }
-  
-  /**
-   * Handle source ended (all samples extracted)
-   */
-  private handleSourceEnded(): void {
-    this.logger.debug('Source ended - all samples extracted');
-    // Don't change state yet - wait until all frames are displayed
-  }
-  
-  /**
-   * Perform a seamless loop back to the start
-   * This resets timing and decoder state for looping
-   */
-  private performSeamlessLoop(): void {
-    this.logger.debug('Performing seamless loop');
-    this.restartFromStart();
-
-    // Emit loop event
-    this.emit('loop');
+    const now = performance.now();
+    this.frameQueue.push(frame, frame.timestamp, now, now, this.clock.ptsAt(now));
+    this.firstFrameResolve?.();
+    this.feed();
   }
 
-  /**
-   * Rewind to the first sample and refill the pipeline.
-   *
-   * The decoder is not reset - the first sample is a keyframe, so it can continue
-   * decoding from the start without reconfiguration.
-   */
-  private restartFromStart(): void {
-    // Reset position to start
-    this.currentPosition = 0;
-
-    // Reset playback timing
-    this.playStartTime = performance.now();
-    this.playStartPosition = 0;
-
-    // Clear existing frame buffer
-    this.clearFrameBuffer();
-
-    // Reset sample indices to start (samples are already in queue from initial load)
-    this.nextSampleIndex = 0;
-    this.nextAudioSampleIndex = 0;
-
-    // Reset audio player
-    if (this.audioPlayer) {
-      this.audioPlayer.clear();
-      this.audioPlayer.resetTiming();
-    }
-
-    // Feed decoders with samples from the start
-    this.feedDecoder();
-    this.feedAudioDecoder();
-  }
-  
   /**
    * Start playback
    */
   play(): void {
-    if (this._state === 'error' || this._state === 'loading' || this._state === 'idle') {
+    if (this._state === 'error' || this._state === 'loading' || this._state === 'idle' || this._state === 'playing') {
       return;
     }
 
     // Playing after the end restarts from the beginning
     if (this._state === 'ended') {
-      this.restartFromStart();
+      this.seekTo(0);
     }
 
-    // Resume extraction if needed
     this.fileSource?.start();
-    
-    // Start audio playback
     this.audioPlayer?.start();
-    
-    this.playStartTime = performance.now();
-    this.playStartPosition = this.currentPosition;
-    
+    this.clock.play();
+
     this.setState('playing');
-    this.logger.info(`Play from position ${this.currentPosition.toFixed(1)}ms`);
+    this.logger.info(`Play from position ${this.getPosition().toFixed(3)}s`);
+    this.feed();
   }
-  
+
   /**
    * Pause playback
    */
@@ -640,97 +575,71 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
     if (this._state !== 'playing') {
       return;
     }
-    
-    // Stop audio playback
+
+    this.clock.pause();
     this.audioPlayer?.stop();
-    
+
     this.setState('paused');
-    this.logger.info(`Paused at position ${this.currentPosition.toFixed(1)}ms`);
+    this.logger.info(`Paused at position ${this.getPosition().toFixed(3)}s`);
   }
-  
+
   /**
-   * Seek to a specific time in seconds
+   * Seek to a time in seconds. Lands on that frame: decoding starts at the keyframe before it
+   * and the frames in between are not shown.
    */
   async seek(timeSeconds: number): Promise<void> {
     if (!this.fileInfo) {
       return;
     }
-    
-    // Clamp to valid range
-    timeSeconds = Math.max(0, Math.min(timeSeconds, this.fileInfo.duration));
-    
-    const targetTimestampUs = timeSeconds * 1_000_000;
-    this.logger.info(`Seeking to ${timeSeconds.toFixed(2)}s`);
-    this.isSeeking = true;
-    
-    // Clear buffer
-    this.clearFrameBuffer();
-    
-    // Reset decoder (sync) - we need to reset for seek since we're jumping to new position
+
+    const time = Math.max(0, Math.min(timeSeconds, this.fileInfo.duration));
+    this.logger.info(`Seeking to ${time.toFixed(3)}s`);
+    this.seekTo(time * 1_000_000);
+
+    // A seek from the end leaves the file playable again
+    if (this._state === 'ended') {
+      this.setState('paused');
+    }
+
+    this.emit('seeked', time);
+  }
+
+  private seekTo(targetUs: number): void {
+    // The timeline starts over at the target: the passes count from it
+    this.clock.seek(targetUs);
+    this.videoPass = 0;
+    this.audioPass = 0;
+    this.lastLoop = 0;
+
+    // Video from the last keyframe at or before the target, in decode order
+    this.frameQueue.clear();
     this.decoder?.reset();
-    
-    // Clear and reset audio
-    if (this.audioPlayer) {
-      this.audioPlayer.clear();
-      this.audioPlayer.resetTiming();
+    let keyframe = 0;
+    for (let i = 0; i < this.videoSamples.length; i++) {
+      const sample = this.videoSamples[i];
+      if (sample.isKeyframe && sample.timestamp <= targetUs) keyframe = i;
+      if (sample.timestamp > targetUs && sample.isKeyframe) break;
     }
-    
-    // Find the nearest keyframe at or before the target time in our sample queue
-    let seekSampleIndex = 0;
-    let actualTimestampUs = 0;
-    
-    for (let i = 0; i < this.sampleQueue.length; i++) {
-      const sample = this.sampleQueue[i];
-      if (sample.timestamp <= targetTimestampUs && sample.isKeyframe) {
-        seekSampleIndex = i;
-        actualTimestampUs = sample.timestamp;
-      }
-      if (sample.timestamp > targetTimestampUs) {
-        break;
-      }
+    this.nextVideo = keyframe;
+
+    // Audio from the sample playing at the target, the output moved there first so what is fed
+    // is not taken as late
+    this.audioPlayer?.clear();
+    this.audioPlayer?.resync();
+    this.nextAudio = 0;
+    while (this.nextAudio < this.audioSamples.length) {
+      const sample = this.audioSamples[this.nextAudio];
+      if (sample.timestamp + sample.duration > targetUs) break;
+      this.nextAudio++;
     }
-    
-    this.nextSampleIndex = seekSampleIndex;
-    this.currentPosition = actualTimestampUs / 1000; // Convert to ms
-    
-    // Find corresponding audio sample index
-    this.nextAudioSampleIndex = 0;
-    for (let i = 0; i < this.audioSampleQueue.length; i++) {
-      if (this.audioSampleQueue[i].timestamp >= actualTimestampUs) {
-        this.nextAudioSampleIndex = i;
-        break;
-      }
-    }
-    
-    // Update play start reference if playing
-    if (this._state === 'playing') {
-      this.playStartTime = performance.now();
-      this.playStartPosition = this.currentPosition;
-    }
-    
-    this.isSeeking = false;
-    
-    // Feed decoders with samples from the new position
-    this.feedDecoder();
-    this.feedAudioDecoder();
-    
-    this.emit('seeked', this.currentPosition / 1000);
+
+    this.feed();
   }
-  
-  /**
-   * Clear the frame buffer
-   */
-  private clearFrameBuffer(): void {
-    for (const { frame } of this.frameBuffer) {
-      frame.close();
-    }
-    this.frameBuffer = [];
-  }
-  
+
   /**
    * Get a video frame for rendering
    *
-   * Call this in your render loop. Returns the appropriate frame for the current time.
+   * Call this in your render loop: it returns the frame due while it will be on screen.
    *
    * The player owns the returned frame and closes it when the next frame is due,
    * so it is valid until the following call. Do not close it - draw from it, or
@@ -740,75 +649,34 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
     if (this._state === 'idle' || this._state === 'loading' || this._state === 'error') {
       return null;
     }
-    
-    // If seeking, return last frame
-    if (this.isSeeking) {
-      return this.lastVideoFrame;
+
+    const now = performance.now();
+    const interval = now - this.lastRenderCall;
+    if (this.lastRenderCall >= 0 && interval >= 4 && interval <= 100) {
+      this.renderIntervalMs += RENDER_SMOOTHING * (interval - this.renderIntervalMs);
     }
-    
-    // Calculate current position
-    if (this._state === 'playing') {
-      const elapsed = performance.now() - this.playStartTime;
-      this.currentPosition = this.playStartPosition + elapsed;
-      
-      // Feed audio decoder based on current position
-      this.feedAudioDecoder();
-      
-      // Check for end of file
-      if (this.fileInfo && this.currentPosition >= this.fileInfo.duration * 1000) {
-        if (this.config.playMode === 'loop') {
-          // Seamless loop - reset position to start without seeking
-          this.performSeamlessLoop();
-          return this.lastVideoFrame;
-        } else {
-          this.setState('ended');
-          this.emit('ended');
-          return this.lastVideoFrame;
-        }
-      }
-    }
-    
-    // Request more frames if buffer is low
-    if (this.frameBuffer.length < this.minBufferSize) {
-      this.fileSource?.start();
-    }
-    
-    // Find the frame closest to current position (without going past it)
-    let frameIndex = -1;
-    for (let i = 0; i < this.frameBuffer.length; i++) {
-      const frame = this.frameBuffer[i];
-      if (frame.timestampMs <= this.currentPosition) {
-        frameIndex = i;
-      } else {
-        break;
-      }
-    }
-    
-    // If we found a suitable frame, use it
-    if (frameIndex >= 0) {
-      // Remove all frames before this one (they're in the past)
-      const removedFrames = this.frameBuffer.splice(0, frameIndex);
-      for (const { frame } of removedFrames) {
-        frame.close();
-      }
-      
-      // Get the current frame (now at index 0)
-      const timedFrame = this.frameBuffer.shift();
-      if (timedFrame) {
-        // Close previous frame
-        if (this.lastVideoFrame && this.lastVideoFrame !== timedFrame.frame) {
-          this.lastVideoFrame.close();
-        }
-        this.lastVideoFrame = timedFrame.frame;
-      }
+    this.lastRenderCall = now;
+
+    this.feed();
+
+    let due = this.clock.ptsAt(now + (this.config.displayLatencyMs ?? 1.5 * this.renderIntervalMs));
+    // Before anything has been shown, show the first frame there is (a file whose first frame
+    // starts a little after zero still shows a picture while paused)
+    if (!this.lastVideoFrame && this.frameQueue.size > 0) {
+      due = Math.max(due, this.frameQueue.oldestTimestamp);
     }
 
-    // Draining freed room in the frame buffer - keep the decoder fed
-    this.feedDecoder();
+    const frame = this.frameQueue.take(due);
+    if (frame) {
+      if (this.lastVideoFrame && this.lastVideoFrame !== frame) {
+        this.lastVideoFrame.close();
+      }
+      this.lastVideoFrame = frame;
+    }
 
     return this.lastVideoFrame;
   }
-  
+
   /**
    * Subscribe to events (typed overloads)
    */
@@ -822,68 +690,59 @@ export class FileVideoPlayer extends BasePlayer<FilePlayerState> {
   override on(event: string, handler: Function): void {
     super.on(event, handler);
   }
-  
+
   /**
    * Unsubscribe from events
    */
   override off(event: string, handler: Function): void {
     super.off(event, handler);
   }
-  
+
   /**
    * Dispose and clean up resources
    * @param full - If true, also disposes the AudioContext (default: false for reload)
    */
   override dispose(full: boolean = false): void {
-    // Stop extraction
+    this.stopPump();
     this.fileSource?.stop();
 
-    // Release anyone waiting on the initial buffer so a reload can't strand them
-    if (this.bufferReadyResolve) {
-      const resolveBuffer = this.bufferReadyResolve;
-      this.bufferReadyResolve = null;
-      resolveBuffer();
-    }
+    // Release anyone waiting on the first frame so a reload can't strand them
+    this.firstFrameResolve?.();
+    this.firstFrameResolve = null;
 
-    // Clear buffer
-    this.clearFrameBuffer();
-    
-    // Clear pending samples
-    this.sampleQueue = [];
-    this.audioSampleQueue = [];
-    this.nextSampleIndex = 0;
-    this.nextAudioSampleIndex = 0;
-    this.audioInitialized = false;
-    
-    // Close last frame
+    this.frameQueue.clear();
+    this.videoSamples = [];
+    this.audioSamples = [];
+    this.nextVideo = 0;
+    this.videoPass = 0;
+    this.nextAudio = 0;
+    this.audioPass = 0;
+    this.lastLoop = 0;
+
     if (this.lastVideoFrame) {
       this.lastVideoFrame.close();
       this.lastVideoFrame = null;
     }
-    
-    // Dispose video decoder
+
     this.decoder?.dispose();
     this.decoder = null;
-    
-    // Dispose audio player
+
     this.audioPlayer?.dispose();
     this.audioPlayer = null;
-    
+
     // Only close audio context on full dispose (not on reload)
     if (full && this.ownsAudioContext && this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;
     }
-    
-    // Dispose source
+
     this.fileSource?.dispose();
     this.fileSource = null;
-    
-    // Reset state
+
     this.fileInfo = null;
-    this.currentPosition = 0;
-    this.playStartTime = 0;
-    this.playStartPosition = 0;
+    this.durationUs = 0;
+    this.clock.pause();
+    this.clock.seek(0);
 
     // Don't clear event handlers here - let caller manage them
     // or call dispose() explicitly when done

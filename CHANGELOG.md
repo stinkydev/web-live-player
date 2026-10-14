@@ -6,6 +6,156 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **Audio steps exactly on wall-clock timelines.** Streams from `MediaCapture` are stamped on the
+  wall clock, which puts the worklet's read position near 1e14 samples - where a double cannot
+  hold the fraction of a resampling step. On a 44.1 kHz device audio ran 0.5% fast and the
+  follower's corrections came in coarse 1.4% jumps. The read position is now a whole sample and
+  a fraction.
+- **A gap in the audio no longer throws away the audio before it.** Restarting the decoder at a
+  gap discarded what it still held, so a burst of packets (a subscription's backlog, a file's
+  feed) lost everything before the gap. The decoder now finishes what it holds first, and
+  packets arriving meanwhile wait in order. A seek still discards at once.
+- **40 and 60 ms Opus packets are no longer taken for gaps.** Packet length was assumed to be
+  20 ms until something decoded; it is now read from the Opus header (or the AAC frame size),
+  or taken from the duration given.
+- **A buffer delay of seconds keeps its audio.** The worklet's ring held 2.7 s and dropped audio
+  written further ahead; it now grows (up to 43 s at 48 kHz).
+- **Long buffer delays keep their video.** The live player held at most 30 decoded frames, so
+  at 50 fps a delay of 1 s dropped frames before their turn and the picture froze. The queue now
+  holds what the clock's delay spans at the stream's frame rate (up to 240 frames).
+- **Two seeks during one fade-out go to the second**, rather than adding up.
+- **`MediaCapture` drop counts carry over a stop and a start**, like its other counters.
+- **MP4 duration follows the edit list**, so a file with a leading empty edit plays to its end
+  and loops at the right point.
+- **A video player sees audio played separately on its clock.** It knew only audio of its own, so
+  with a separate `LiveAudioPlayer` on its clock (elmo's live audio) `SyncStats.audio` and
+  `avSyncMs` were null and the stats overlay showed no audio. A `LiveAudioPlayer` now makes
+  itself known to its clock, and a video player without audio of its own uses that.
+
+### Changed
+
+- `LiveAudioPlayer.decode()` requires a timestamp: a packet without one cannot be placed and is
+  dropped (with a warning, once). The old fallback could never start.
+
+### Added
+
+- `presentationDurationS()`, the edit list's presentation duration.
+- `LiveClock.addAudio()` / `removeAudio()` / `getAudio()` and the `ClockAudio` type.
+
+## 0.2.0
+
+Live playback is rebuilt around a clock that audio and video share. See "Timing and A/V Sync"
+in the README.
+
+### Breaking
+
+- **`FrameScheduler` is gone.** The live player keeps to a `LiveClock` instead, buffering
+  decoded frames in a `VideoFrameQueue` with statistics in `PlaybackStats`.
+  `FrameScheduler`, `FrameTiming`, `SchedulerStatus`, `SchedulerConfig` and `DropReason` are
+  removed; `LatencyStats` and `PacketTimingEntry` are still exported.
+- **`FileAudioPlayer` takes a clock.** `new FileAudioPlayer(context, { clock })`, timestamps in
+  microseconds on the clock's timeline; `resetTiming()` is removed, `resync()` added.
+- **`LiveAudioPlayer` is rewritten.** `decode(payload, ptsUs)` takes the timestamp in
+  microseconds, and it now matters - the old player ignored it. `decodeFrame(frame)` takes a
+  parsed packet with its timestamp in the timebase of the codec data given to `init()`.
+  `resetTiming()` is removed. Pass `{ clock }` to play in sync with a video player.
+- **Audio waits for `play()`, and `pause()` mutes it.** The live player used to start audio as
+  soon as it arrived and keep it playing while paused.
+- **`bufferDelayMs` defaults to 150 and means a delay behind the earliest-arriving packets.**
+  Data later than that is dropped, so latency stays where it is set. `0` still shows each
+  frame as soon as it decodes; audio then plays 50 ms behind, out of sync.
+- **`getVideoFrame()` no longer uses its argument.** It picks the frame due when the frame will
+  be on screen, by default 1.5 render intervals after the call (`displayLatencyMs`), so render
+  loops on a timeline of their own (a fixed frame rate) get the right frame.
+
+### Fixed
+
+- **Audio and video play in sync.** They used to share nothing but the buffer delay setting:
+  audio played its chunks back to back as they arrived, its timestamps ignored, with latency
+  anywhere between nothing and the delay plus 100 ms, while video corrected its own clock with a
+  freeze or a skip every few seconds. Both now present what one clock says is due, the audio
+  heard (output latency included) checked against it every 20 ms. Measured with a flash and a
+  beep sharing a timestamp: within about 11 ms of each other at the screen and the speakers.
+- **Audio no longer drifts on 44.1 kHz devices.** Resampling each chunk on its own dropped a
+  sample at every boundary: 48 kHz Opus ran 68 ms a minute fast, AAC 51 ms. One continuous read
+  now converts the rate, and the audio device's own drift is learned and taken out.
+- **Playback starts at the buffer delay.** Video used to start on its first frame and reach the
+  delay about three seconds later, with a freeze.
+- **The backlog a subscription opens with is no longer shown.** A relay hands a new subscriber
+  the current group from its start, up to a GOP of old frames; video started that far behind
+  the live edge and caught up with a skip. It is now decoded but not shown.
+- **Streams published with `MediaCapture` carry their timestamps.** The pts was written as a
+  bigint, which the wire serializer writes as 0, so every packet went out stamped 0.
+- **`MediaCapture` puts audio and video on one clock.** The browser stamps each captured track
+  on a clock of its own; in Chrome the camera's and the microphone's are hours apart (one counts
+  from system start), so a player keeping to timestamps could not play them together - the new
+  one dropped all the audio as late. The encoder workers now map each track onto the wall clock
+  as frames are delivered: the published tracks line up within a few tens of milliseconds, and
+  follow a capture clock that drifts.
+- **A capture encoder that falls behind drops frames instead of queueing them**, so latency and
+  memory no longer grow without bound. `CaptureStats` counts them in `videoFramesDropped` and
+  `audioFramesDropped`.
+- **The video encoder worker closes every frame it is handed**, including those arriving before
+  the encoder is configured, which leaked.
+- **File playback keeps audio and video in sync.** `FileVideoPlayer` timed video by the system
+  clock and played audio as a queue of chunks, so the two only started together: every pause
+  moved the audio ahead by up to a frame, an underrun or a background tab moved it for good, the
+  100-chunk worklet queue silently dropped audio of 20 ms chunks, and 48 kHz AAC on a 44.1 kHz
+  device ran 51 ms a minute ahead. It now plays both on a `MediaClock`, the audio keeping to it
+  like live audio does. Measured with flash-and-beep files: within 20 ms at the screen through
+  pauses, seeks and loops, at 44.1 and 48 kHz.
+- **MP4 edit lists are applied.** Files with B-frames start their video a few frames into the
+  media and AAC files skip the encoder's priming, both through the edit list; ignored, video
+  showed 67 ms late and audio 21 ms early in a typical ffmpeg file.
+- **Opus in MP4 plays.** mp4box names the codec `'Opus'`, which WebCodecs rejects; the track had
+  no audio.
+- **A seek lands on the requested time**, not on the keyframe before it, and drops no audio:
+  the audio decoder restarts at the new position instead of playing what it held first.
+- **A file in a background tab keeps its audio**, and its picture catches up from a keyframe on
+  return instead of decoding its way through.
+- **Decoded audio keeps its timestamps across a gap.** Chrome's `AudioDecoder` stamps its output
+  by counting samples from the first chunk, so after packets were lost or skipped every chunk
+  came out early by the gap. The decoder restarts at a gap.
+- **A small buffer delay no longer breaks audio or sync.** The audio output renders ahead of what
+  is heard (40-60 ms in Chrome) and the video decoder takes its time, both before any network
+  jitter: below those, audio chunks were dropped and video showed late. Each player now reports
+  what it needs to its clock (`setMinimumDelay`), and the clock runs at the larger of the buffer
+  delay and that. Network lateness never raises it.
+
+### Added
+
+- `LiveClock` and the `clock` option of `LiveVideoPlayer` and `LiveAudioPlayer`: players of one
+  stream owned separately stay in sync by sharing one.
+- `audioDestination` and `displayLatencyMs` player options, `getClock()`, and `getStats().sync`
+  (`SyncStats`): the clock's state, the measured A/V offset, late frames and the audio player's
+  `LiveAudioStats`.
+- `LiveAudioPlayer`: `destination` and `trackKey` options, `getStats()`, `audiblePtsAt()`.
+- `FileVideoPlayer`: `audioDestination` and `displayLatencyMs` options; `getStats().audio`.
+- `MediaClock`, and `editListOffsetUs()` for the edit list arithmetic.
+- `MediaCapture`: `mediaStream` option, to capture a stream of your own (a canvas, a screen)
+  instead of the camera and microphone.
+- A/V sync test demo (`demo/sync`): publishes a flash-and-beep test pattern - directly, or
+  through `MediaCapture` - and measures lip sync of it, or of any flash-and-beep stream, at the
+  screen and the speakers.
+- `StatsOverlay`: a diagnostic panel for a `LiveVideoPlayer`, drawn into a canvas of its own -
+  the delay asked for and the one the clock runs at, what video and audio need, latency, network
+  jitter, A/V sync and late frames, over a graph of when each frame was ready against when it
+  had to be. The player demo has it as a checkbox.
+- `LiveClock.setMinimumDelay()` / `clearMinimumDelay()` / `getEffectiveDelay()`; `SyncStats`
+  gains `effectiveDelayMs`, `minimumDelayMs`, `videoMinimumDelayMs` and `displayLeadMs`, the
+  audio stats `outputLeadMs` and `minimumDelayMs`, and `PacketTimingEntry` `latenessMs`.
+
+### Changed
+
+- The live player creates its `AudioContext` when audio first arrives, so a stream without audio
+  never makes one.
+- The audio worklet is TypeScript, bundled into the library as a string by
+  `vite-plugin-worklet.ts`. Its processor is registered as `live-audio-playout`.
+
+## 0.1.30
+
+### Fixed
+
 - **A publisher restart no longer leaves the player dropping frames.** When Sesame is
   stopped and started again the stream's timestamps start over, but the frame scheduler
   kept the real-time-to-stream-time mapping it had built for the old run. Against it every

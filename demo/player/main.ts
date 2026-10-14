@@ -10,7 +10,12 @@ import {
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
+  StatsOverlay,
 } from '../../index';
+
+const statsOverlayInput = document.getElementById('statsOverlay') as HTMLInputElement;
+// Made for the player it shows, again whenever the player is replaced
+let statsOverlay: StatsOverlay | null = null;
 
 // DOM Elements
 const videoCanvas = document.getElementById('videoCanvas') as HTMLCanvasElement;
@@ -23,6 +28,7 @@ const logContainer = document.getElementById('logContainer')!;
 // Stats elements
 const statBuffer = document.getElementById('statBuffer')!;
 const statLatency = document.getElementById('statLatency')!;
+const statSync = document.getElementById('statSync')!;
 const statResolution = document.getElementById('statResolution')!;
 const statFrameRate = document.getElementById('statFrameRate')!;
 const statDropped = document.getElementById('statDropped')!;
@@ -155,6 +161,12 @@ function updateStats() {
     statLatency.textContent = '-';
   }
   
+  // Frame on screen against the audio heard; the clock's speed shows it following the publisher
+  const sync = stats.sync;
+  statSync.textContent = sync.clockRunning
+    ? `${sync.avSyncMs !== null ? `${sync.avSyncMs}ms` : 'no audio'} (${sync.clockRate.toFixed(3)}x)`
+    : '-';
+
   // Display bandwidth
   if (stats.bandwidth) {
     statVideoBandwidth.textContent = formatBandwidth(stats.bandwidth.videoBytesPerSecond);
@@ -477,8 +489,13 @@ function renderLoop(timestamp: number) {
         }
         ctx.drawImage(frame, 0, 0, videoCanvas.width, videoCanvas.height);
       }
+
+      if (statsOverlayInput.checked) {
+        if (statsOverlay?.player !== player) statsOverlay = new StatsOverlay(player);
+        statsOverlay.drawOnto(ctx, 8, 8);
+      }
     }
-    
+
     // Update stats every 500ms
     if (timestamp - lastStatsUpdate >= 500) {
       updateStats();

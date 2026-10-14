@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
+import { workletSource } from './vite-plugin-worklet';
 
 export default defineConfig({
   // Handle tinyh264's .asset files as URLs
@@ -38,9 +39,10 @@ export default defineConfig({
     },
   },
   plugins: [
+    workletSource(),
     dts({
       include: ['./**/*.ts'],
-      exclude: ['./demo/**/*', './**/*.test.ts', './vitest.config.ts', './tmp/**/*'],
+      exclude: ['./demo/**/*', './**/*.test.ts', './vitest.config.ts', './vite-plugin-worklet.ts', './tmp/**/*'],
     }),
   ],
 });

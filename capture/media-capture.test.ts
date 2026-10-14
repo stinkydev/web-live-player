@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MediaCapture } from './media-capture';
 import { BaseCaptureSink, SerializedPacket } from './capture-sink';
 import { CaptureStats, EncodedChunkEvent } from './capture-types';
+import { WireProtocol } from '@stinkycomputing/sesame-api-client';
 
 class FakeSink extends BaseCaptureSink {
   sent: SerializedPacket[] = [];
@@ -60,7 +61,32 @@ describe('MediaCapture', () => {
   const feed = (event: EncodedChunkEvent) => (capture as any).handleEncodedChunk(event);
   const startStats = () => (capture as any).startStatsTimer();
 
+  describe('packets', () => {
+    it('carry the chunk timestamp as the pts', () => {
+      // 2026 in microseconds since the epoch: beyond 32 bits, within 2^53
+      feed(fakeChunk('video', 10, 1_791_000_000_000_000));
+      const parsed = WireProtocol.parse(new Uint8Array(sink.sent[0].data));
+      expect(Number(parsed.header?.media?.pts)).toBe(1_791_000_000_000_000);
+    });
+
+    it('shift the audio pts by audioTimestampOffset', () => {
+      capture = new MediaCapture({ sink, statsInterval: 1000, audioTimestampOffset: 5000 });
+      feed(fakeChunk('audio', 10, 1_000_000));
+      const parsed = WireProtocol.parse(new Uint8Array(sink.sent[0].data));
+      expect(Number(parsed.header?.media?.pts)).toBe(1_005_000);
+    });
+  });
+
   describe('statistics', () => {
+    it('keeps drop counts across a stop and a new encoder', async () => {
+      const c = capture as any;
+      c.state = 'capturing';
+      c.encoder = { videoFramesDropped: 3, audioFramesDropped: 1, dispose() {} };
+      await capture.stop();
+      c.encoder = { videoFramesDropped: 2, audioFramesDropped: 0, dispose() {} };
+      expect(capture.getStats()).toMatchObject({ videoFramesDropped: 5, audioFramesDropped: 1 });
+    });
+
     it('counts frames and bytes per media type', () => {
       feed(fakeChunk('video', 1000));
       feed(fakeChunk('audio', 100));

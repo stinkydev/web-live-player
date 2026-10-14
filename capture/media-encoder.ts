@@ -44,6 +44,11 @@ export class MediaStreamEncoder {
   private audioMetadata?: { channels: number; sampleRate: number };
   private videoMetadata?: { width: number; height: number };
 
+  /** Video frames the encoder worker dropped for falling behind */
+  videoFramesDropped = 0;
+  /** Audio chunks the encoder worker dropped for falling behind */
+  audioFramesDropped = 0;
+
   constructor(
     stream: MediaStream,
     videoOptions?: VideoEncoderOptions,
@@ -157,15 +162,17 @@ export class MediaStreamEncoder {
 
     // Set up worker message handling
     this.audioWorker.onmessage = (event) => {
-      const { type, data, metadata } = event.data;
-      
+      const { type, data, metadata, timestamp, dropped } = event.data;
+
       switch (type) {
         case 'chunk':
+          this.audioFramesDropped = dropped ?? this.audioFramesDropped;
           this.emit<EncodedChunkEvent>('chunk', {
             type: 'audio',
             chunk: data,
             keyframe: false, // Audio doesn't have keyframes
-            timestamp: data.timestamp,
+            // On the wall clock shared with the video track (the worker rebases it)
+            timestamp: timestamp ?? data.timestamp,
             metadata: {
               ...this.audioMetadata,
               decoderConfig: metadata?.decoderConfig,
@@ -246,15 +253,17 @@ export class MediaStreamEncoder {
 
     // Set up worker message handling
     this.videoWorker.onmessage = (event) => {
-      const { type, data, metadata } = event.data;
-      
+      const { type, data, metadata, timestamp, dropped } = event.data;
+
       switch (type) {
         case 'chunk':
+          this.videoFramesDropped = dropped ?? this.videoFramesDropped;
           this.emit<EncodedChunkEvent>('chunk', {
             type: 'video',
             chunk: data,
             keyframe: data.type === 'key',
-            timestamp: data.timestamp,
+            // On the wall clock shared with the audio track (the worker rebases it)
+            timestamp: timestamp ?? data.timestamp,
             metadata: {
               ...this.videoMetadata,
               decoderConfig: metadata?.decoderConfig,

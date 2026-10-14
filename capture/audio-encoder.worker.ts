@@ -5,12 +5,18 @@
  * Supports audio level monitoring for VU meters.
  */
 
-export {};
+import { TimestampRebaser, wallClockUs } from './timestamp-rebase';
 
 declare const self: Worker;
 
+/** Chunks the encoder may have queued (about 100 ms) before new audio is dropped */
+const MAX_ENCODE_QUEUE = 10;
+
 let audioEncoder: AudioEncoder | undefined = undefined;
 let processingStream: boolean = false;
+// Capture timestamps on the wall clock shared with the video track
+const rebaser = new TimestampRebaser();
+let framesDropped = 0;
 
 // Audio level monitoring configuration
 let audioLevelEnabled: boolean = false;
@@ -59,7 +65,9 @@ function createEncoder(config: AudioEncoderConfig) {
         self.postMessage({
           type: 'chunk',
           data: chunk,
-          metadata: metadata
+          metadata: metadata,
+          timestamp: rebaser.map(chunk.timestamp),
+          dropped: framesDropped,
         });
       },
       error: (err) => {
@@ -80,22 +88,30 @@ function encodeChunk(frame: AudioData) {
     self.postMessage({ type: 'error', data: 'Received null or undefined frame' });
     return;
   }
-  
-  if (!audioEncoder) {
-    self.postMessage({ type: 'error', data: 'Encoder not initialized' });
-    return;
-  }
-  
-  if (audioEncoder.state !== 'configured') {
-    self.postMessage({ type: 'error', data: `Encoder not in configured state: ${audioEncoder.state}` });
-    return;
-  }
-  
+
   try {
+    rebaser.observe(frame.timestamp, wallClockUs());
+
+    if (!audioEncoder) {
+      self.postMessage({ type: 'error', data: 'Encoder not initialized' });
+      return;
+    }
+
+    if (audioEncoder.state !== 'configured') {
+      self.postMessage({ type: 'error', data: `Encoder not in configured state: ${audioEncoder.state}` });
+      return;
+    }
+
+    if (audioEncoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
+      framesDropped++;
+      return;
+    }
+
     audioEncoder.encode(frame);
-    frame.close(); // Important to free resources
   } catch (err) {
     self.postMessage({ type: 'error', data: err instanceof Error ? err.message : String(err) });
+  } finally {
+    frame.close(); // Important to free resources
   }
 }
 

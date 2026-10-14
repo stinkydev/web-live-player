@@ -27,8 +27,17 @@ export interface MediaCaptureConfig extends CaptureConfig {
   sink: ICaptureSink;
   /** Topic/channel identifier for routing packets */
   topic?: string;
-  /** Audio timestamp offset to align with video (microseconds) */
+  /**
+   * Shift applied to the audio timestamps, in microseconds, to trim lip sync by hand. The
+   * tracks are put on one clock already; this is for a source whose audio is late or early.
+   */
   audioTimestampOffset?: number;
+  /**
+   * Capture this stream instead of the camera and microphone (a canvas, a screen, processed
+   * audio). The `video` and `audio` options still choose which of its tracks are sent. The
+   * caller keeps ownership: stop() leaves its tracks running.
+   */
+  mediaStream?: MediaStream;
 }
 
 /**
@@ -59,10 +68,15 @@ export class MediaCapture {
   private lastVideoBytesSent = 0;
   private lastAudioBytesSent = 0;
 
+  // Frames dropped by encoders since stopped
+  private droppedBefore = { video: 0, audio: 0 };
+
   // Stats tracking
   private stats: CaptureStats = {
     videoFramesEncoded: 0,
     audioFramesEncoded: 0,
+    videoFramesDropped: 0,
+    audioFramesDropped: 0,
     bytesSent: 0,
     packetsSent: 0,
     videoBitrate: 0,
@@ -204,6 +218,9 @@ export class MediaCapture {
     if (this.stats.startTime > 0) {
       this.stats.duration = Date.now() - this.stats.startTime;
     }
+    // Counts of encoders stopped earlier, plus the running one's
+    this.stats.videoFramesDropped = this.droppedBefore.video + (this.encoder?.videoFramesDropped ?? 0);
+    this.stats.audioFramesDropped = this.droppedBefore.audio + (this.encoder?.audioFramesDropped ?? 0);
     return { ...this.stats };
   }
 
@@ -236,7 +253,7 @@ export class MediaCapture {
       return;
     }
 
-    if (!MediaCapture.hasMediaDevices()) {
+    if (!this.config.mediaStream && !MediaCapture.hasMediaDevices()) {
       throw new Error('Media devices not available. Make sure you are using HTTPS.');
     }
 
@@ -262,7 +279,7 @@ export class MediaCapture {
         throw new Error('Must enable at least video or audio capture');
       }
 
-      this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      this.mediaStream = this.config.mediaStream ?? await navigator.mediaDevices.getUserMedia(constraints);
 
       // Extract metadata from tracks
       const videoTracks = this.mediaStream.getVideoTracks();
@@ -357,15 +374,19 @@ export class MediaCapture {
     this.stopStatsTimer();
     this.paused = false;
 
-    // Stop encoder
+    // Stop encoder, keeping its drop counts: the stats are cumulative over restarts
     if (this.encoder) {
+      this.droppedBefore.video += this.encoder.videoFramesDropped;
+      this.droppedBefore.audio += this.encoder.audioFramesDropped;
       this.encoder.dispose();
       this.encoder = undefined;
     }
 
-    // Stop media stream
+    // Stop the media stream, unless the caller handed it over
     if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach(track => track.stop());
+      if (this.mediaStream !== this.config.mediaStream) {
+        this.mediaStream.getTracks().forEach(track => track.stop());
+      }
       this.mediaStream = undefined;
     }
 
@@ -525,7 +546,8 @@ export class MediaCapture {
     const hdr: sesame.v1.wire.IFrameHeader = {
       type: isVideo ? sesame.v1.wire.FrameType.FRAME_TYPE_VIDEO : sesame.v1.wire.FrameType.FRAME_TYPE_AUDIO,
       media: {
-        pts: BigInt(event.timestamp),
+        // A number: the wire serializer writes a bigint pts as 0. Microsecond timestamps stay exact.
+        pts: event.timestamp,
         keyframe: event.keyframe,
         codecData: {
           codecType: isVideo ? this.videoCodec.type : this.audioCodec,
@@ -545,7 +567,7 @@ export class MediaCapture {
 
     // Apply audio timestamp offset
     if (!isVideo && this.config.audioTimestampOffset) {
-      hdr.media!.pts += BigInt(this.config.audioTimestampOffset);
+      hdr.media!.pts = event.timestamp + this.config.audioTimestampOffset;
     }
 
     if (this.config.topic) {

@@ -5,15 +5,25 @@
  * Supports keyframe requests and configurable GOP (Group of Pictures).
  */
 
-export {};
+import { TimestampRebaser, wallClockUs } from './timestamp-rebase';
 
 declare const self: Worker;
+
+/**
+ * Frames the encoder may have queued before new ones are dropped. A live encoder that falls
+ * behind drops frames rather than queue them: latency, and the captured frames held, would grow
+ * without bound.
+ */
+const MAX_ENCODE_QUEUE = 2;
 
 let videoEncoder: VideoEncoder | undefined = undefined;
 let processingStream: boolean = false;
 let keyFrameRequested: boolean = false;
 let frameCount: number = 0;
 let gopSize: number = 60; // Default GOP size
+// Capture timestamps on the wall clock shared with the audio track
+const rebaser = new TimestampRebaser();
+let framesDropped = 0;
 
 self.onmessage = async (event) => {
   const { type, data } = event.data;
@@ -54,7 +64,9 @@ function createEncoder(config: VideoEncoderConfig) {
         self.postMessage({
           type: 'chunk',
           data: chunk,
-          metadata: metadata
+          metadata: metadata,
+          timestamp: rebaser.map(chunk.timestamp),
+          dropped: framesDropped,
         });
       },
       error: (err) => {
@@ -74,18 +86,26 @@ function encodeFrame(frame: VideoFrame) {
     self.postMessage({ type: 'error', data: 'Received null or undefined frame' });
     return;
   }
-  
-  if (!videoEncoder) {
-    self.postMessage({ type: 'error', data: 'Encoder not initialized' });
-    return;
-  }
-  
-  if (videoEncoder.state !== 'configured') {
-    self.postMessage({ type: 'error', data: `Encoder not in configured state: ${videoEncoder.state}` });
-    return;
-  }
-  
+
   try {
+    rebaser.observe(frame.timestamp, wallClockUs());
+
+    if (!videoEncoder) {
+      self.postMessage({ type: 'error', data: 'Encoder not initialized' });
+      return;
+    }
+
+    if (videoEncoder.state !== 'configured') {
+      self.postMessage({ type: 'error', data: `Encoder not in configured state: ${videoEncoder.state}` });
+      return;
+    }
+
+    // A keyframe asked for (or due) goes on the next frame encoded
+    if (videoEncoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
+      framesDropped++;
+      return;
+    }
+
     frameCount++;
     let keyFrame = frameCount % gopSize === 0;
     
@@ -97,9 +117,10 @@ function encodeFrame(frame: VideoFrame) {
     }
     
     videoEncoder.encode(frame, { keyFrame });
-    frame.close();
   } catch (err) {
     self.postMessage({ type: 'error', data: err instanceof Error ? err.message : String(err) });
+  } finally {
+    frame.close();
   }
 }
 
