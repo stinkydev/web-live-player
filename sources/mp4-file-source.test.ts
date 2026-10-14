@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { MP4FileSource } from './mp4-file-source';
+import { MP4FileSource, editListOffsetUs } from './mp4-file-source';
 
 describe('MP4FileSource', () => {
   let source: MP4FileSource;
@@ -349,5 +349,23 @@ describe('MP4FileSource', () => {
     it('should return null for audioDescription before loading', () => {
       expect(source.getAudioDescription()).toBeNull();
     });
+  });
+});
+
+describe('editListOffsetUs', () => {
+  it('is zero without an edit list', () => {
+    expect(editListOffsetUs(undefined, 1000, 30000)).toBe(0);
+    expect(editListOffsetUs([], 1000, 30000)).toBe(0);
+  });
+
+  it('moves a track back by where its first edit starts (B-frame delay, AAC priming)', () => {
+    // video starting 2 frames (2002 / 30000 s) into its media
+    expect(editListOffsetUs([{ segment_duration: 10_000, media_time: 2002 }], 1000, 30000)).toBeCloseTo(-66_733.3, 0);
+    // AAC with 1024 samples of priming at 48 kHz
+    expect(editListOffsetUs([{ segment_duration: 10_000, media_time: 1024 }], 1000, 48000)).toBeCloseTo(-21_333.3, 0);
+  });
+
+  it('delays a track by its leading empty edits', () => {
+    expect(editListOffsetUs([{ segment_duration: 500, media_time: -1 }, { segment_duration: 9_500, media_time: 0 }], 1000, 48000)).toBe(500_000);
   });
 });

@@ -173,6 +173,35 @@ describe('LiveClock', () => {
     expect(clock.getBufferDelay()).toBe(300);
   });
 
+  it('runs no closer to the arrivals than its players need', () => {
+    const time = fakeTime();
+    const clock = new LiveClock({ bufferDelayMs: 40, now: time.now });
+    run(clock, time, stream({ count: 100 }));
+    clock.setMinimumDelay('audio:a', 52);   // an audio output rendering ~50 ms ahead
+    let t = time.now();
+    expect(clock.getEffectiveDelay()).toBe(55);
+    expect(clock.ptsAt(t)).toBeCloseTo(ideal(t, 10_000, 30, 55), -2);
+    // a minimum below the buffer delay changes nothing
+    clock.setBufferDelay(150);
+    t = time.now();
+    expect(clock.ptsAt(t)).toBeCloseTo(ideal(t, 10_000, 30, 150), -2);
+    expect(clock.getStats()).toMatchObject({ bufferDelayMs: 150, effectiveDelayMs: 150, minimumDelayMs: 55 });
+  });
+
+  it('lowers the floor only past its hysteresis, and when a player goes', () => {
+    const time = fakeTime();
+    const clock = new LiveClock({ bufferDelayMs: 0, now: time.now });
+    run(clock, time, stream({ count: 100 }));
+    clock.setMinimumDelay('video:v', 80);
+    clock.setMinimumDelay('video:v', 75);
+    expect(clock.getEffectiveDelay()).toBe(80);
+    clock.setMinimumDelay('video:v', 60);
+    expect(clock.getEffectiveDelay()).toBe(60);
+    clock.setMinimumDelay('audio:a', 45);
+    clock.clearMinimumDelay('video:v');
+    expect(clock.getEffectiveDelay()).toBe(45);
+  });
+
   it('re-syncs when the publisher restarts its timestamps', () => {
     const time = fakeTime();
     const clock = new LiveClock({ bufferDelayMs: 150, now: time.now });

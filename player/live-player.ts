@@ -35,6 +35,10 @@ const FRAME_QUEUE_CAPACITY = 30;
 
 /** Weight of the newest sample in the averaged statistics */
 const STATS_SMOOTHING = 0.1;
+/** Decode latencies the video's minimum delay is taken over */
+const DECODE_WINDOW = 60;
+/** Packets later than this (the backlog a subscription opens with) say nothing about decoding */
+const ON_TIME_MS = 20;
 
 /** The frames from the last keyframe on; all of them when none is a keyframe. */
 export function framesFromLastKeyframe(frames: ParsedFrame[]): ParsedFrame[] {
@@ -56,7 +60,10 @@ export interface PlayerConfig {
    * Ignored when a shared `clock` is given - the clock's delay applies.
    */
   bufferDelayMs?: number;
-  /** Clock to play on. Share one with other players of the same stream to keep them in sync. */
+  /**
+   * Clock to play on. Share one with other players of the same stream to keep them in sync. The
+   * player reports its decoder's latency to it as the least delay the picture can be on time at.
+   */
   clock?: LiveClock;
   enableAudio?: boolean;
   /** External AudioContext to use for audio playback. If provided, the player will not create or close it. */
@@ -111,6 +118,14 @@ export interface SyncStats {
   avSyncMs: number | null;
   /** Frames that finished decoding after their time had come */
   lateFrames: number;
+  /** The delay the clock runs at: the buffer delay, or what the players need if that is larger */
+  effectiveDelayMs: number;
+  /** The least delay the players on the clock need, in ms */
+  minimumDelayMs: number;
+  /** The least delay this player's video needs: decoding, and showing ahead of the screen, in ms */
+  videoMinimumDelayMs: number;
+  /** How far ahead of the getVideoFrame() call frames are picked, in ms */
+  displayLeadMs: number;
   /** The audio player's own statistics; null without audio */
   audio: LiveAudioStats | null;
 }
@@ -193,6 +208,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   /** Key the video packets are reported to the clock under, cached per track name */
   private clockTrackName: string | null = null;
   private clockTrackKey = 'video';
+  /** Lateness of the packet being handled; NaN for packets replayed after configuration */
+  private packetLatenessMs = NaN;
   private frameQueue: VideoFrameQueue<VideoFrame>;
   private playbackStats = new PlaybackStats();
   private lastVideoFrame: VideoFrame | null = null;
@@ -239,6 +256,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   private timingTimestamps = new Float64Array(LiveVideoPlayer.TIMING_RING_SIZE);
   private timingArrivals = new Float64Array(LiveVideoPlayer.TIMING_RING_SIZE);
   private timingKeyframes = new Uint8Array(LiveVideoPlayer.TIMING_RING_SIZE);
+  private timingLateness = new Float64Array(LiveVideoPlayer.TIMING_RING_SIZE);
+  // Decode latency of on-time packets, for the least delay the picture needs
+  private decodeLatencies = new Float64Array(DECODE_WINDOW);
+  private decodeLatencyCount = 0;
+  private decodeLatencyWrite = 0;
+  private decodeSorted = new Float64Array(DECODE_WINDOW);
+  private videoMinimumDelayMs = 0;
   private timingWrite: number = 0;
   private timingCount: number = 0;
 
@@ -484,7 +508,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       this.renderIntervalMs += STATS_SMOOTHING * (interval - this.renderIntervalMs);
     }
     this.lastRenderCall = now;
-    const at = now + (this.config.displayLatencyMs ?? 1.5 * this.renderIntervalMs);
+    const at = now + this.displayLeadMs();
     const bypass = this.clock.getBufferDelay() === 0;
     const due = bypass ? null : this.clock.ptsAt(at);
 
@@ -504,7 +528,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
 
     if (frame) {
       this.consecutiveDrops = 0;
-      this.playbackStats.recordLatency(this.frameQueue.takenArrivalTime, this.frameQueue.takenDecodeTime, now);
+      // Up to when it will be on screen, the moment it was picked for
+      this.playbackStats.recordLatency(this.frameQueue.takenArrivalTime, this.frameQueue.takenDecodeTime, at);
       this.measureSync(this.frameQueue.takenTimestamp, at);
 
       // Close the previous frame
@@ -515,6 +540,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
 
     return this.lastVideoFrame;
+  }
+
+  /** How far ahead of the getVideoFrame() call frames are picked: until they are on screen */
+  private displayLeadMs(): number {
+    return this.config.displayLatencyMs ?? 1.5 * this.renderIntervalMs;
   }
 
   /** Compare a frame going on screen at `atMs` with the audio heard then. */
@@ -648,6 +678,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
         clockJumps: clockStats.jumps,
         avSyncMs: this.avSyncMs === null ? null : Math.round(this.avSyncMs * 10) / 10,
         lateFrames: this.lateFrames,
+        effectiveDelayMs: clockStats.effectiveDelayMs,
+        minimumDelayMs: clockStats.minimumDelayMs,
+        videoMinimumDelayMs: this.videoMinimumDelayMs,
+        displayLeadMs: Math.round(this.displayLeadMs() * 10) / 10,
         audio: this.audioPlayer?.getStats() ?? null,
       },
     };
@@ -789,6 +823,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
     const timebase = codecChanged ? timebaseFromCodecData(codecData) : this.currentTimebase;
     this.clock.onPacket(this.clockTrackKey, rescaleTime(data.header.media?.pts ?? 0, timebase, MICROSECOND_TIMEBASE), arrivalMs);
+    this.packetLatenessMs = this.clock.packetLatenessMs;
 
     // Check for codec changes
     if (codecChanged) {
@@ -865,7 +900,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       // Use rescaled PTS (microseconds) as key to match what decoder outputs
       const arrivalTime = performance.now();
       const timestampUs = rescaleTime(data.header.media?.pts ?? 0, this.currentTimebase, MICROSECOND_TIMEBASE);
-      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe);
+      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, this.packetLatenessMs);
 
       // Estimate FPS from timestamp difference between consecutive frames
       if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
@@ -917,17 +952,20 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.pendingDuringConfig = [];
     const pending = framesFromLastKeyframe(queued);
     this.logger.info(`Processing ${pending.length} of ${queued.length} frames queued during configuration`);
+    // Replayed now, not as they arrived: their decode latency means nothing
+    this.packetLatenessMs = NaN;
     for (const pendingData of pending) {
       this.decodeVideoFrame(pendingData);
     }
   }
 
-  /** Record a packet's arrival time and keyframe flag in the timing ring */
-  private recordPacketTiming(timestampUs: number, arrivalTime: number, isKeyframe: boolean): void {
+  /** Record a packet's arrival time, keyframe flag and lateness in the timing ring */
+  private recordPacketTiming(timestampUs: number, arrivalTime: number, isKeyframe: boolean, latenessMs: number): void {
     const i = this.timingWrite;
     this.timingTimestamps[i] = timestampUs;
     this.timingArrivals[i] = arrivalTime;
     this.timingKeyframes[i] = isKeyframe ? 1 : 0;
+    this.timingLateness[i] = latenessMs;
     this.timingWrite = (i + 1) % LiveVideoPlayer.TIMING_RING_SIZE;
     if (this.timingCount < LiveVideoPlayer.TIMING_RING_SIZE) {
       this.timingCount++;
@@ -1172,18 +1210,46 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     const i = this.findPacketTiming(timestampUs);
     const arrivalTime = i >= 0 ? this.timingArrivals[i] : decodeTime;
     const isKeyframe = i >= 0 ? this.timingKeyframes[i] === 1 : false;
-    this.playbackStats.recordPacket(arrivalTime, timestampUs, isKeyframe, decodeTime);
+    this.playbackStats.recordPacket(arrivalTime, timestampUs, isKeyframe, decodeTime, i >= 0 ? this.timingLateness[i] : NaN);
+    if (i >= 0 && this.timingLateness[i] <= ON_TIME_MS) {
+      this.recordDecodeLatency(decodeTime - arrivalTime);
+    }
 
     let due: number | null = null;
     if (this.clock.getBufferDelay() > 0) {
       due = this.clock.ptsAt(decodeTime);
-      if (due !== null && timestampUs < due) this.lateFrames++;
+      // Late if it was due on screen before it could get there
+      const dueOnScreen = this.clock.ptsAt(decodeTime + this.displayLeadMs());
+      if (dueOnScreen !== null && timestampUs < dueOnScreen) this.lateFrames++;
       // Before the clock starts, the backlog a subscription opens with is already behind it
       if (due === null) due = this.clock.targetAt(decodeTime);
     }
 
     this.frameQueue.push(frame, timestampUs, arrivalTime, decodeTime, due,
       this.playbackStats.lastPacketIndex, this.playbackStats.lastPacketSeq);
+  }
+
+  /**
+   * Track how long decoding takes, and tell the clock the least delay at which the picture is on
+   * time: the decode latency of nine packets in ten, plus how far ahead of the screen frames are
+   * picked.
+   */
+  private recordDecodeLatency(latencyMs: number): void {
+    this.decodeLatencies[this.decodeLatencyWrite] = latencyMs;
+    this.decodeLatencyWrite = (this.decodeLatencyWrite + 1) % DECODE_WINDOW;
+    if (this.decodeLatencyCount < DECODE_WINDOW) this.decodeLatencyCount++;
+    if (this.decodeLatencyCount < 15 || this.decodeLatencyWrite % 15 !== 0) return;
+
+    const n = this.decodeLatencyCount;
+    const sorted = this.decodeSorted.subarray(0, n);
+    sorted.set(this.decodeLatencies.subarray(0, n));
+    sorted.sort();
+    const p90 = sorted[Math.min(n - 1, Math.floor(n * 0.9))];
+    const minimum = Math.ceil(p90 + this.displayLeadMs() + 2);
+    if (minimum !== this.videoMinimumDelayMs) {
+      this.videoMinimumDelayMs = minimum;
+      this.clock.setMinimumDelay(this.clockTrackKey, minimum);
+    }
   }
 
   /**
@@ -1327,6 +1393,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
    * Dispose the player and release resources
    */
   dispose(): void {
+    // The clock may live on with other players: this one no longer needs anything of it
+    this.clock.clearMinimumDelay(this.clockTrackKey);
+    this.videoMinimumDelayMs = 0;
+    this.decodeLatencyCount = 0;
+
     // Disconnect from source, and dispose it if the player created it
     if (this.streamSource && this.boundDataHandler) {
       this.streamSource.off('data', this.boundDataHandler);

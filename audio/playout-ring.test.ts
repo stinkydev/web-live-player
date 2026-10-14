@@ -80,6 +80,17 @@ describe('PlayoutRing', () => {
     expect(ring.write(9_500, ramp(9_500, 960), null)).toBe(460 + 2);
   });
 
+  it('takes audio for where a jump is going while it fades out', () => {
+    const ring = new PlayoutRing({ outputRate: RATE, fadeMs: 1 });
+    ring.write(100_000, ramp(0, 9600), null);
+    ring.seek(100_000);
+    ring.playing = true;
+    renderQuanta(ring, 2);
+    ring.seek(10_000);   // back, as a seek in a file goes
+    expect(ring.write(10_000, ramp(0, 960), null)).toBe(960);
+    expect(ring.lateSamples).toBe(0);
+  });
+
   it('never plays a slot left over from an earlier lap', () => {
     const ring = new PlayoutRing({ outputRate: RATE, capacityLog2: 12, fadeMs: 1 });
     ring.write(100, sine(100, 960, 440), null);
@@ -130,6 +141,22 @@ describe('PlayoutRing', () => {
     renderQuanta(ring, 10);
     // 2560 output samples at step 1, plus the 5000 jumped
     expect(ring.readPos).toBe(2560 + 5000);
+  });
+
+  it('holds its place once faded out when told to, and picks up from there', () => {
+    const ring = new PlayoutRing({ outputRate: RATE, fadeMs: 1 });
+    ring.advanceWhileMuted = false;
+    ring.write(0, ramp(0, 9600), null);
+    ring.seek(0);
+    ring.playing = true;
+    renderQuanta(ring, 10);
+    ring.playing = false;
+    renderQuanta(ring, 10);
+    // 1280 samples played, then the 48-sample fade-out, holding on the sample it reaches silence
+    expect(ring.readPos).toBe(1280 + 47);
+    ring.playing = true;
+    renderQuanta(ring, 1);
+    expect(ring.readPos).toBe(1280 + 47 + 128);
   });
 
   it('keeps the read position moving while muted', () => {

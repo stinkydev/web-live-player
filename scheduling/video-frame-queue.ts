@@ -69,6 +69,11 @@ export class VideoFrameQueue<T> {
     return this.count;
   }
 
+  /** Timestamp of the oldest queued frame, NaN when empty */
+  get oldestTimestamp(): number {
+    return this.count === 0 ? NaN : this.slot(0).timestamp;
+  }
+
   /** Timestamp of the newest queued frame, NaN when empty */
   get newestTimestamp(): number {
     return this.count === 0 ? NaN : this.slot(this.count - 1).timestamp;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AudioFollower, audiblePosition } from './live-audio-player';
+import { AudioFollower, audiblePosition } from './clocked-audio-output';
 
 /**
  * Error of audio following a clock through `seconds` of reports every ~21 ms, on a device that

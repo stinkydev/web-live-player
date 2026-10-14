@@ -11,11 +11,17 @@
  * to performance time with the context's output timestamp). Their difference is the end-to-end
  * A/V offset; positive means the audio comes late.
  *
- * Capture: publishes camera and microphone through MediaCapture instead, to check the capture
- * pipeline. Its media carries no flash or beep, so only the playback statistics apply.
+ * Capture: publishes through MediaCapture instead, to check the capture pipeline - either a
+ * canvas flash and a Web Audio beep set off together (aligned to about a frame: the canvas is
+ * captured when it next paints), or the camera and microphone, which carry no flash or beep, so
+ * only the playback statistics apply.
  *
- * URL parameters (for headless runs): relay, ns, buffer, mode, publish=pattern|capture|off (or
- * 1|0), seconds, autostart=1, debug=1.
+ * File: plays an MP4 with FileVideoPlayer instead (a flash-and-beep file measures like a stream),
+ * optionally looping, pausing and seeking along the way to check sync holds through them.
+ *
+ * URL parameters (for headless runs): relay, ns, buffer, mode,
+ * publish=pattern|capture-pattern|camera|off (or 1|0), file=<mp4 url>, loop=1, pauseEvery=<s>,
+ * seekEvery=<s>, seconds, autostart=1, debug=1.
  * The summary is logged as `SYNC_RESULT {...}`.
  */
 
@@ -26,10 +32,12 @@ import {
 } from '@stinkycomputing/sesame-api-client';
 import {
   createMoQSource,
+  FileVideoPlayer,
   LiveAudioPlayer,
   LiveClock,
   LiveVideoPlayer,
   MediaCapture,
+  StatsOverlay,
   MoQCaptureSink,
   StreamDataEvent,
 } from '../../index';
@@ -39,6 +47,7 @@ const $ = (id: string) => document.getElementById(id)!;
 const relayInput = $('relay') as HTMLInputElement;
 const nsInput = $('namespace') as HTMLInputElement;
 const bufferInput = $('buffer') as HTMLInputElement;
+const fileInput = $('file') as HTMLInputElement;
 const modeSelect = $('mode') as HTMLSelectElement;
 const publishSelect = $('publish') as HTMLSelectElement;
 const startButton = $('start') as HTMLButtonElement;
@@ -52,6 +61,7 @@ const params = new URLSearchParams(location.search);
 relayInput.value = params.get('relay') ?? relayInput.value;
 nsInput.value = params.get('ns') ?? `wlp-sync-test-${Math.random().toString(36).slice(2, 8)}`;
 bufferInput.value = params.get('buffer') ?? bufferInput.value;
+fileInput.value = params.get('file') ?? '';
 modeSelect.value = params.get('mode') ?? modeSelect.value;
 const publishParam = params.get('publish');
 publishSelect.value = publishParam === '0' ? 'off' : publishParam === '1' || !publishParam ? 'pattern' : publishParam;
@@ -179,12 +189,16 @@ class TestPublisher {
   }
 }
 
-/** Camera and microphone through the library's capture pipeline */
+/**
+ * Publishes through the library's capture pipeline: the camera and microphone, or a canvas that
+ * flashes white once a second while a Web Audio oscillator beeps.
+ */
 class CapturePublisher {
   private sink: MoQCaptureSink;
   private capture: MediaCapture;
+  private pattern: { ctx: AudioContext; gate: GainNode; draw: CanvasRenderingContext2D; timer: ReturnType<typeof setInterval> } | null = null;
 
-  constructor(relayUrl: string, namespace: string) {
+  constructor(relayUrl: string, namespace: string, source: 'camera' | 'pattern') {
     this.sink = new MoQCaptureSink({
       relayUrl,
       namespace,
@@ -193,11 +207,47 @@ class CapturePublisher {
     });
     this.capture = new MediaCapture({
       sink: this.sink,
+      mediaStream: source === 'pattern' ? this.startPattern() : undefined,
       video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 30 } },
       audio: true,
       videoEncoder: { codec: CodecType.CODEC_TYPE_VIDEO_VP8, bitrate: 800_000, frameRate: 30, keyFrameInterval: 60, latencyMode: 'realtime' },
     });
     this.capture.on('error', (e) => log(`capture error: ${e.message}`));
+  }
+
+  /** A stream whose picture flashes and whose sound beeps at the same moments, once a second */
+  private startPattern(): MediaStream {
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 360;
+    const draw = canvas.getContext('2d')!;
+    const ctx = new AudioContext({ sampleRate: 48000 });
+    const oscillator = ctx.createOscillator();
+    oscillator.frequency.value = 1000;
+    const gate = ctx.createGain();
+    gate.gain.value = 0;
+    const out = ctx.createMediaStreamDestination();
+    oscillator.connect(gate).connect(out);
+    oscillator.start();
+    ctx.resume().catch(() => {});
+
+    let second = Math.floor(performance.now() / 1000);
+    let flashUntil = 0;
+    const timer = setInterval(() => {
+      const now = performance.now();
+      const s = Math.floor(now / 1000);
+      if (s !== second) {
+        second = s;
+        flashUntil = now + 40;
+        gate.gain.setValueAtTime(0.6, ctx.currentTime);
+        gate.gain.setValueAtTime(0, ctx.currentTime + 0.02);
+      }
+      draw.fillStyle = now < flashUntil ? '#fff' : '#203040';
+      draw.fillRect(0, 0, canvas.width, canvas.height);
+    }, 5);
+    this.pattern = { ctx, gate, draw, timer };
+
+    return new MediaStream([...canvas.captureStream(30).getVideoTracks(), ...out.stream.getAudioTracks()]);
   }
 
   async start(): Promise<void> {
@@ -213,6 +263,11 @@ class CapturePublisher {
     this.capture.dispose();
     await this.sink.disconnect();
     this.sink.dispose();
+    if (this.pattern) {
+      clearInterval(this.pattern.timer);
+      this.pattern.ctx.close();
+      this.pattern = null;
+    }
   }
 }
 
@@ -273,6 +328,8 @@ class Meter {
     ],
   });
   private player: LiveVideoPlayer | null = null;
+  private filePlayer: FileVideoPlayer | null = null;
+  private fileTimers: ReturnType<typeof setInterval>[] = [];
   private audio: LiveAudioPlayer | null = null;
   private audioCodec: IMediaCodecData | null = null;
   private raf = 0;
@@ -299,21 +356,11 @@ class Meter {
     this.detector.connect(this.ctx.destination);
     this.detector.port.onmessage = (e) => this.onOnset(e.data.onset);
 
-    const bufferDelayMs = Number(bufferInput.value);
-    if (modeSelect.value === 'shared') {
-      // Separately owned players on one clock, the way elmo wires them
-      const clock = new LiveClock({ bufferDelayMs, logger: debug ? (m) => log(m) : undefined });
-      this.player = new LiveVideoPlayer({ clock, enableAudio: false, debugLogging: debug });
-      this.audio = new LiveAudioPlayer(this.ctx, { clock, destination: this.detector, trackKey: 'audio:audio' });
-      this.source.on('data', (event: StreamDataEvent) => this.onAudioData(event));
+    if (fileInput.value.trim()) {
+      await this.startFile(fileInput.value.trim());
     } else {
-      this.player = new LiveVideoPlayer({ bufferDelayMs, audioContext: this.ctx, audioDestination: this.detector, debugLogging: debug });
+      await this.startLive();
     }
-    this.player.setStreamSource(this.source);
-    this.player.play();
-    await this.ctx.resume().catch(() => {});
-    await this.source.connect();
-    log(`playing ${namespace()} (${modeSelect.value}, buffer ${bufferDelayMs} ms), audio context ${this.ctx.state} at ${this.ctx.sampleRate} Hz`);
 
     const render = (t: number) => {
       this.raf = requestAnimationFrame(render);
@@ -321,6 +368,57 @@ class Meter {
     };
     this.raf = requestAnimationFrame(render);
     this.statsTimer = setInterval(() => this.showStats(), 1000);
+  }
+
+  private async startFile(url: string): Promise<void> {
+    const player = new FileVideoPlayer({
+      audioContext: this.ctx,
+      audioDestination: this.detector!,
+      playMode: params.get('loop') === '1' ? 'loop' : 'once',
+      debugLogging: debug,
+    });
+    this.filePlayer = player;
+    player.on('loop', () => log('loop'));
+    player.on('ended', () => log('ended'));
+    const info = await player.loadFromUrl(url);
+    await this.ctx.resume().catch(() => {});
+    player.play();
+    log(`playing ${url}: ${info.width}x${info.height} ${info.videoCodec}, audio ${info.audioCodec ?? 'none'} ${info.audioSampleRate ?? ''} Hz, ${info.duration.toFixed(2)} s, context ${this.ctx.sampleRate} Hz`);
+
+    const pauseEvery = Number(params.get('pauseEvery') ?? 0);
+    if (pauseEvery > 0) {
+      this.fileTimers.push(setInterval(() => {
+        player.pause();
+        log(`paused at ${player.getPosition().toFixed(3)} s`);
+        setTimeout(() => player.play(), 700);
+      }, pauseEvery * 1000));
+    }
+    const seekEvery = Number(params.get('seekEvery') ?? 0);
+    if (seekEvery > 0) {
+      this.fileTimers.push(setInterval(() => {
+        const to = Math.random() * Math.max(0, info.duration - 3);
+        log(`seek to ${to.toFixed(3)} s`);
+        player.seek(to);
+      }, seekEvery * 1000));
+    }
+  }
+
+  private async startLive(): Promise<void> {
+    const bufferDelayMs = Number(bufferInput.value);
+    if (modeSelect.value === 'shared') {
+      // Separately owned players on one clock, the way elmo wires them
+      const clock = new LiveClock({ bufferDelayMs, logger: debug ? (m) => log(m) : undefined });
+      this.player = new LiveVideoPlayer({ clock, enableAudio: false, debugLogging: debug });
+      this.audio = new LiveAudioPlayer(this.ctx, { clock, destination: this.detector!, trackKey: 'audio:audio' });
+      this.source.on('data', (event: StreamDataEvent) => this.onAudioData(event));
+    } else {
+      this.player = new LiveVideoPlayer({ bufferDelayMs, audioContext: this.ctx, audioDestination: this.detector!, debugLogging: debug });
+    }
+    this.player.setStreamSource(this.source);
+    this.player.play();
+    await this.ctx.resume().catch(() => {});
+    await this.source.connect();
+    log(`playing ${namespace()} (${modeSelect.value}, buffer ${bufferDelayMs} ms), audio context ${this.ctx.state} at ${this.ctx.sampleRate} Hz`);
   }
 
   private async onAudioData(event: StreamDataEvent): Promise<void> {
@@ -335,10 +433,11 @@ class Meter {
   }
 
   private render(t: number): void {
-    const frame = this.player?.getVideoFrame(t) ?? null;
+    const frame = this.filePlayer ? this.filePlayer.getVideoFrame() : this.player?.getVideoFrame(t) ?? null;
     if (!frame || frame === this.lastFrame) return;
     this.lastFrame = frame;
     view.drawImage(frame, 0, 0, canvas.width, canvas.height);
+    if (params.get('overlay') === '1' && this.player) this.drawOverlay(this.player);
 
     // A flash: the middle of the picture gets clearly brighter. Test streams flash the whole
     // frame, or (tjolahopp) a small box in the centre from mid to light grey.
@@ -358,6 +457,18 @@ class Meter {
     this.luma += 0.1 * (luma - this.luma);
   }
 
+  private overlay: StatsOverlay | null = null;
+  private overlayLogged = false;
+  private drawOverlay(player: LiveVideoPlayer): void {
+    this.overlay ??= new StatsOverlay(player);
+    this.overlay.drawOnto(view, 4, 4);
+    // Once, for a look at it in a headless run
+    if (!this.overlayLogged && performance.now() - this.started > 12_000 && this.overlay.canvas instanceof HTMLCanvasElement) {
+      this.overlayLogged = true;
+      console.log('OVERLAY ' + this.overlay.canvas.toDataURL('image/png'));
+    }
+  }
+
   private onOnset(contextTime: number): void {
     const ts = this.ctx.getOutputTimestamp();
     const perf = ts.contextTime && ts.performanceTime
@@ -365,7 +476,7 @@ class Meter {
       : performance.now() + (contextTime - this.ctx.currentTime + (this.ctx.outputLatency || this.ctx.baseLatency || 0)) * 1000;
     this.onsets.push(perf);
     // The audio keeps to the clock (its error is in the stats), so the clock says what was heard
-    this.onsetPts.push(this.player?.getClock().ptsAt(perf) ?? NaN);
+    this.onsetPts.push(this.player ? this.player.getClock().ptsAt(perf) ?? NaN : NaN);
     this.match();
   }
 
@@ -391,6 +502,10 @@ class Meter {
   }
 
   private showStats(): void {
+    if (this.filePlayer) {
+      this.showFileStats(this.filePlayer);
+      return;
+    }
     const s = this.player?.getStats();
     if (!s) return;
     const audio = s.sync.audio ?? this.audio?.getStats() ?? null;
@@ -410,7 +525,33 @@ class Meter {
     statsEl.innerHTML = items.map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
   }
 
+  private showFileStats(player: FileVideoPlayer): void {
+    const s = player.getStats();
+    const audio = s.audio;
+    const items: [string, string][] = [
+      ['A/V offset (measured)', this.offsets.length ? `${median(this.offsets).toFixed(1)} ms (n=${this.offsets.length})` : '-'],
+      ['Position', `${s.position.toFixed(2)} / ${s.duration.toFixed(2)} s, ${s.state}`],
+      ['Video buffer', `${s.bufferSize} frames`],
+      ['Audio', audio ? `${audio.state}, buffered ${audio.bufferedMs} ms, err ${audio.syncErrorMs ?? '-'} ms, drift ${audio.deviceDriftPercent}%` : '-'],
+      ['Audio drops', audio ? `${audio.underrunMs} ms silent, ${audio.lateMs} ms late, ${audio.jumps} jumps, ${audio.gaps} gaps` : '-'],
+    ];
+    if (++this.ticks % 5 === 0) log(items.map(([k, v]) => `${k}: ${v}`).join(' | '));
+    statsEl.innerHTML = items.map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+  }
+
   summary() {
+    if (this.filePlayer) {
+      const s = this.filePlayer.getStats();
+      return {
+        file: fileInput.value,
+        seconds: Math.round((performance.now() - this.started) / 1000),
+        contextRate: this.ctx.sampleRate,
+        measured: this.offsets.length ? describe(this.offsets) : null,
+        position: s.position,
+        state: s.state,
+        audio: s.audio,
+      };
+    }
     const s = this.player?.getStats();
     const audio = s?.sync.audio ?? this.audio?.getStats() ?? null;
     return {
@@ -437,6 +578,8 @@ class Meter {
   dispose(): void {
     cancelAnimationFrame(this.raf);
     if (this.statsTimer) clearInterval(this.statsTimer);
+    for (const timer of this.fileTimers) clearInterval(timer);
+    this.filePlayer?.dispose(true);
     this.player?.dispose();
     this.audio?.dispose();
     this.source.dispose();
@@ -471,8 +614,8 @@ async function start() {
   try {
     if (publishSelect.value === 'pattern') {
       publisher = new TestPublisher(relayInput.value, namespace());
-    } else if (publishSelect.value === 'capture') {
-      publisher = new CapturePublisher(relayInput.value, namespace());
+    } else if (publishSelect.value === 'capture-pattern' || publishSelect.value === 'camera') {
+      publisher = new CapturePublisher(relayInput.value, namespace(), publishSelect.value === 'camera' ? 'camera' : 'pattern');
     }
     await publisher?.start();
     meter = new Meter();

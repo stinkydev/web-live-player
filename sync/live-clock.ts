@@ -15,6 +15,13 @@
  * Small corrections (the publisher's clock drifting against the local one, a change in
  * network delay) are made by running the clock up to `maxRateAdjust` fast or slow; large
  * ones (a new buffer delay, a much faster path) by jumping.
+ *
+ * Players also have latency of their own that the delay has to cover before any network
+ * jitter: a video decoder takes time to turn a packet into a picture, and an audio output
+ * renders ahead of what is heard. Each reports what it needs with setMinimumDelay(), and the
+ * clock runs at the larger of the buffer delay and the largest of those, so a small buffer
+ * delay gives the lowest latency at which every player keeps up - in sync, and without
+ * dropping audio - rather than broken playback. Network lateness never raises it.
  */
 
 export interface LiveClockConfig {
@@ -31,7 +38,12 @@ export interface LiveClockConfig {
 export interface LiveClockStats {
   /** Whether the clock has started */
   running: boolean;
+  /** The delay asked for */
   bufferDelayMs: number;
+  /** The delay the clock runs at: the buffer delay, or the players' minimum if that is larger */
+  effectiveDelayMs: number;
+  /** The largest delay a player on the clock needs to keep up, in ms */
+  minimumDelayMs: number;
   /** Current speed, 1 = real time */
   rate: number;
   /** How far the clock is from where it should be, in ms (positive = ahead) */
@@ -58,6 +70,10 @@ const JUMP_THRESHOLD_US = 100_000;
 const SLEW_TIME_US = 1_000_000;
 /** Updates closer together than this reuse the current rate */
 const UPDATE_INTERVAL_MS = 10;
+/** Players' minimum delays are rounded up to this step... */
+const MINIMUM_STEP_MS = 5;
+/** ...and the floor comes down only when they have fallen this far below it */
+const MINIMUM_HYSTERESIS_MS = 10;
 /**
  * A track whose `arrival - pts` moves by more than this between two packets is on a new
  * timeline (the publisher restarted). A plain gap moves both by the same amount.
@@ -100,6 +116,10 @@ export class LiveClock {
   private jumps = 0;
   private discontinuities = 0;
 
+  // What the players on the clock need, and the floor that makes
+  private minimumDelays = new Map<string, number>();
+  private floorMs = 0;
+
   constructor(config: LiveClockConfig = {}) {
     this.bufferDelayMs = Math.max(0, config.bufferDelayMs ?? DEFAULT_BUFFER_DELAY_MS);
     this.maxRateAdjust = Math.max(0, config.maxRateAdjust ?? 0.01);
@@ -115,6 +135,59 @@ export class LiveClock {
   /** Current speed, 1 = real time. */
   get rate(): number {
     return this._rate;
+  }
+
+  /** How late the last packet reported arrived compared with the earliest-arriving ones, in ms */
+  get packetLatenessMs(): number {
+    return this.lastLatenessMs;
+  }
+
+  /** The delay the clock runs at: the buffer delay, or the players' minimum if that is larger */
+  getEffectiveDelay(): number {
+    return Math.max(this.bufferDelayMs, this.floorMs);
+  }
+
+  /**
+   * Set the least delay a player needs to keep up, under a key of its own: a video decoder's
+   * latency, an audio output's. The clock never runs closer to the arrivals than the largest.
+   */
+  setMinimumDelay(key: string, delayMs: number): void {
+    this.minimumDelays.set(key, Math.max(0, delayMs));
+    this.refreshFloor();
+  }
+
+  /** Drop a player's minimum (it has gone). */
+  clearMinimumDelay(key: string): void {
+    if (this.minimumDelays.delete(key)) this.refreshFloor();
+  }
+
+  private refreshFloor(): void {
+    let max = 0;
+    for (const value of this.minimumDelays.values()) max = Math.max(max, value);
+    const stepped = Math.ceil(max / MINIMUM_STEP_MS) * MINIMUM_STEP_MS;
+    const before = this.getEffectiveDelay();
+    if (stepped > this.floorMs) {
+      this.floorMs = stepped;
+    } else if (stepped < this.floorMs - MINIMUM_HYSTERESIS_MS) {
+      // Lower: the clock runs a little fast to get there
+      this.floorMs = stepped;
+      return;
+    } else {
+      return;
+    }
+    // Higher: a player is missing its turn now, so jump rather than slew
+    if (this.getEffectiveDelay() > before) this.jumpToTarget(this.now());
+  }
+
+  /** Re-anchor the timeline on the target at `timeMs` */
+  private jumpToTarget(timeMs: number): void {
+    if (!this.running || this.offsetMs === null) return;
+    this.anchorMs = timeMs;
+    this.anchorPtsUs = (timeMs - this.offsetMs - this.getEffectiveDelay()) * 1000;
+    this._rate = 1;
+    this.lastErrorUs = 0;
+    this.lastUpdateMs = timeMs;
+    this.jumps++;
   }
 
   /**
@@ -148,7 +221,7 @@ export class LiveClock {
     this.refreshOffset(bucket);
     this.lastLatenessMs = this.offsetMs === null ? 0 : relative - this.offsetMs;
 
-    if (this.running && this.lastLatenessMs > this.bufferDelayMs + 10) {
+    if (this.running && this.lastLatenessMs > this.getEffectiveDelay() + 10) {
       if (this.lateSinceMs === null) {
         this.lateSinceMs = arrivalMs;
         this.lateMinRelative = relative;
@@ -176,7 +249,7 @@ export class LiveClock {
     this.offsetMs = this.lateMinRelative;
     this.lateSinceMs = null;
     this.anchorMs = timeMs;
-    this.anchorPtsUs = (timeMs - this.offsetMs - this.bufferDelayMs) * 1000;
+    this.anchorPtsUs = (timeMs - this.offsetMs - this.getEffectiveDelay()) * 1000;
     this._rate = 1;
     this.lastErrorUs = 0;
     this.lastUpdateMs = timeMs;
@@ -203,23 +276,16 @@ export class LiveClock {
    */
   targetAt(timeMs: number = this.now()): number | null {
     if (this.offsetMs === null) return null;
-    return (timeMs - this.offsetMs - this.bufferDelayMs) * 1000;
+    return (timeMs - this.offsetMs - this.getEffectiveDelay()) * 1000;
   }
 
   /** Change the delay. A running clock jumps to it rather than drifting there. */
   setBufferDelay(delayMs: number): void {
     const delay = Math.max(0, delayMs);
     if (delay === this.bufferDelayMs) return;
+    const before = this.getEffectiveDelay();
     this.bufferDelayMs = delay;
-    if (this.running && this.offsetMs !== null) {
-      const timeMs = this.now();
-      this.anchorMs = timeMs;
-      this.anchorPtsUs = (timeMs - this.offsetMs - delay) * 1000;
-      this._rate = 1;
-      this.lastErrorUs = 0;
-      this.lastUpdateMs = timeMs;
-      this.jumps++;
-    }
+    if (this.getEffectiveDelay() !== before) this.jumpToTarget(this.now());
   }
 
   getBufferDelay(): number {
@@ -236,6 +302,8 @@ export class LiveClock {
     return {
       running: this.running,
       bufferDelayMs: this.bufferDelayMs,
+      effectiveDelayMs: this.getEffectiveDelay(),
+      minimumDelayMs: this.floorMs,
       rate: this._rate,
       errorMs: Math.round(this.lastErrorUs / 100) / 10,
       jumps: this.jumps,
@@ -273,7 +341,7 @@ export class LiveClock {
     if (!force && timeMs - this.lastUpdateMs < UPDATE_INTERVAL_MS) return;
     this.lastUpdateMs = timeMs;
 
-    const targetUs = (timeMs - this.offsetMs - this.bufferDelayMs) * 1000;
+    const targetUs = (timeMs - this.offsetMs - this.getEffectiveDelay()) * 1000;
 
     if (!this.running) {
       if (timeMs - this.firstPacketMs < STARTUP_MS) return;

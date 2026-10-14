@@ -36,6 +36,35 @@ export interface DecodableSample {
 }
 
 /**
+ * An entry of a track's edit list (elst), as mp4box parses it
+ */
+export interface EditListEntry {
+  /** Length of the edit, in the movie timescale */
+  segment_duration: number;
+  /** Where in the track's media the edit starts, in its timescale; -1 for an empty edit */
+  media_time: number;
+}
+
+/**
+ * Microseconds to add to a track's sample times so they follow its edit list: leading empty
+ * edits delay the track, and the first real edit says where in the media presentation starts.
+ * Encoders use it to hide what precedes the first frame - B-frame reordering delay, AAC priming
+ * - so without it video comes late and audio early.
+ */
+export function editListOffsetUs(entries: EditListEntry[] | undefined, movieTimescale: number, mediaTimescale: number): number {
+  if (!entries || entries.length === 0 || !movieTimescale || !mediaTimescale) return 0;
+  let emptyUs = 0;
+  for (const entry of entries) {
+    if (entry.media_time === -1) {
+      emptyUs += (entry.segment_duration / movieTimescale) * 1_000_000;
+      continue;
+    }
+    return emptyUs - (entry.media_time / mediaTimescale) * 1_000_000;
+  }
+  return emptyUs;
+}
+
+/**
  * Event handlers for MP4FileSource
  */
 export interface MP4FileSourceEvents {
@@ -56,6 +85,9 @@ export class MP4FileSource {
   private audioTrackId: number | null = null;
   private videoTrack: Track | null = null;
   private audioTrack: Track | null = null;
+  // Edit list offsets of the tracks, in µs
+  private videoOffsetUs = 0;
+  private audioOffsetUs = 0;
   
   // Sample extraction state
   private nextVideoSampleIndex: number = 0;
@@ -88,6 +120,13 @@ export class MP4FileSource {
     return this.fileInfo;
   }
   
+  /**
+   * Number of samples in each track, known once the file is ready
+   */
+  getSampleCounts(): { video: number; audio: number } {
+    return { video: this.totalVideoSamples, audio: this.totalAudioSamples };
+  }
+
   /**
    * Get the video codec description (for VideoDecoder.configure)
    */
@@ -495,10 +534,11 @@ export class MP4FileSource {
       this.videoTrack = info.videoTracks[0];
       this.videoTrackId = this.videoTrack.id;
       this.totalVideoSamples = this.videoTrack.nb_samples;
-      
+
       // Extract video description for decoder config
       const trak = this.mp4File?.getTrackById(this.videoTrackId);
       if (trak) {
+        this.videoOffsetUs = editListOffsetUs((trak as any).edts?.elst?.entries, info.timescale, this.videoTrack.timescale);
         const entry = trak.mdia?.minf?.stbl?.stsd?.entries?.[0];
         if (entry) {
           // Get avcC or hvcC box for codec description
@@ -526,6 +566,7 @@ export class MP4FileSource {
       // Extract audio description for decoder config (ESDS box for AAC)
       const audioTrak = this.mp4File?.getTrackById(this.audioTrackId);
       if (audioTrak) {
+        this.audioOffsetUs = editListOffsetUs((audioTrak as any).edts?.elst?.entries, info.timescale, this.audioTrack.timescale);
         const audioEntry = audioTrak.mdia?.minf?.stbl?.stsd?.entries?.[0];
         if (audioEntry) {
           const esds = (audioEntry as any).esds;
@@ -647,8 +688,8 @@ export class MP4FileSource {
     const decodableSamples: DecodableSample[] = samples
       .filter(sample => sample.data != null)
       .map(sample => {
-        // Convert sample time to microseconds
-        const timestampUs = (sample.cts / sample.timescale) * 1_000_000;
+        // Convert sample time to microseconds on the presentation timeline (edit list applied)
+        const timestampUs = (sample.cts / sample.timescale) * 1_000_000 + (isVideo ? this.videoOffsetUs : this.audioOffsetUs);
         const durationUs = (sample.duration / sample.timescale) * 1_000_000;
       
         return {

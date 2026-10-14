@@ -10,7 +10,12 @@ import {
   createWebSocketSource,
   createFilePlayer,
   FileVideoPlayer,
+  StatsOverlay,
 } from '../../index';
+
+const statsOverlayInput = document.getElementById('statsOverlay') as HTMLInputElement;
+// Made for the player it shows, again whenever the player is replaced
+let statsOverlay: StatsOverlay | null = null;
 
 // DOM Elements
 const videoCanvas = document.getElementById('videoCanvas') as HTMLCanvasElement;
@@ -484,8 +489,13 @@ function renderLoop(timestamp: number) {
         }
         ctx.drawImage(frame, 0, 0, videoCanvas.width, videoCanvas.height);
       }
+
+      if (statsOverlayInput.checked) {
+        if (statsOverlay?.player !== player) statsOverlay = new StatsOverlay(player);
+        statsOverlay.drawOnto(ctx, 8, 8);
+      }
     }
-    
+
     // Update stats every 500ms
     if (timestamp - lastStatsUpdate >= 500) {
       updateStats();

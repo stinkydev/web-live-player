@@ -13,6 +13,8 @@ in the README.
   decoded frames in a `VideoFrameQueue` with statistics in `PlaybackStats`.
   `FrameScheduler`, `FrameTiming`, `SchedulerStatus`, `SchedulerConfig` and `DropReason` are
   removed; `LatencyStats` and `PacketTimingEntry` are still exported.
+- **`FileAudioPlayer` takes a clock.** `new FileAudioPlayer(context, { clock })`, timestamps in
+  microseconds on the clock's timeline; `resetTiming()` is removed, `resync()` added.
 - **`LiveAudioPlayer` is rewritten.** `decode(payload, ptsUs)` takes the timestamp in
   microseconds, and it now matters - the old player ignored it. `decodeFrame(frame)` takes a
   parsed packet with its timestamp in the timebase of the codec data given to `init()`.
@@ -44,6 +46,33 @@ in the README.
   the live edge and caught up with a skip. It is now decoded but not shown.
 - **Streams published with `MediaCapture` carry their timestamps.** The pts was written as a
   bigint, which the wire serializer writes as 0, so every packet went out stamped 0.
+- **`MediaCapture` puts audio and video on one clock.** The browser stamps each captured track
+  on a clock of its own; in Chrome the camera's and the microphone's are hours apart (one counts
+  from system start), so a player keeping to timestamps could not play them together - the new
+  one dropped all the audio as late. The encoder workers now map each track onto the wall clock
+  as frames are delivered: the published tracks line up within a few tens of milliseconds, and
+  follow a capture clock that drifts.
+- **A capture encoder that falls behind drops frames instead of queueing them**, so latency and
+  memory no longer grow without bound. `CaptureStats` counts them in `videoFramesDropped` and
+  `audioFramesDropped`.
+- **The video encoder worker closes every frame it is handed**, including those arriving before
+  the encoder is configured, which leaked.
+- **File playback keeps audio and video in sync.** `FileVideoPlayer` timed video by the system
+  clock and played audio as a queue of chunks, so the two only started together: every pause
+  moved the audio ahead by up to a frame, an underrun or a background tab moved it for good, the
+  100-chunk worklet queue silently dropped audio of 20 ms chunks, and 48 kHz AAC on a 44.1 kHz
+  device ran 51 ms a minute ahead. It now plays both on a `MediaClock`, the audio keeping to it
+  like live audio does. Measured with flash-and-beep files: within 20 ms at the screen through
+  pauses, seeks and loops, at 44.1 and 48 kHz.
+- **MP4 edit lists are applied.** Files with B-frames start their video a few frames into the
+  media and AAC files skip the encoder's priming, both through the edit list; ignored, video
+  showed 67 ms late and audio 21 ms early in a typical ffmpeg file.
+- **Opus in MP4 plays.** mp4box names the codec `'Opus'`, which WebCodecs rejects; the track had
+  no audio.
+- **A seek lands on the requested time**, not on the keyframe before it, and drops no audio:
+  the audio decoder restarts at the new position instead of playing what it held first.
+- **A file in a background tab keeps its audio**, and its picture catches up from a keyframe on
+  return instead of decoding its way through.
 - **Decoded audio keeps its timestamps across a gap.** Chrome's `AudioDecoder` stamps its output
   by counting samples from the first chunk, so after packets were lost or skipped every chunk
   came out early by the gap. The decoder restarts at a gap.
@@ -56,8 +85,13 @@ in the README.
   (`SyncStats`): the clock's state, the measured A/V offset, late frames and the audio player's
   `LiveAudioStats`.
 - `LiveAudioPlayer`: `destination` and `trackKey` options, `getStats()`, `audiblePtsAt()`.
-- A/V sync test demo (`demo/sync`): publishes a flash-and-beep test pattern and measures lip
-  sync of it, or of any flash-and-beep stream, at the screen and the speakers.
+- `FileVideoPlayer`: `audioDestination` and `displayLatencyMs` options; `getStats().audio`.
+- `MediaClock`, and `editListOffsetUs()` for the edit list arithmetic.
+- `MediaCapture`: `mediaStream` option, to capture a stream of your own (a canvas, a screen)
+  instead of the camera and microphone.
+- A/V sync test demo (`demo/sync`): publishes a flash-and-beep test pattern - directly, or
+  through `MediaCapture` - and measures lip sync of it, or of any flash-and-beep stream, at the
+  screen and the speakers.
 
 ### Changed
 

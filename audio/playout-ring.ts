@@ -41,8 +41,13 @@ export class PlayoutRing {
   readPos = NaN;
   /** Stream samples per output sample */
   step = 1;
-  /** Whether output is audible (the read position advances either way) */
+  /** Whether output is audible */
   playing = false;
+  /**
+   * Whether the read position keeps moving while muted: a live stream runs on regardless; a paused
+   * file holds its place once faded out.
+   */
+  advanceWhileMuted = true;
 
   private gain = 0;
   private shiftPending = false;
@@ -75,8 +80,10 @@ export class PlayoutRing {
     let from = 0;
     let to = n;
     if (this.readPos === this.readPos) {   // not NaN: drop what is behind the read position or out of reach
-      const earliest = Math.floor(this.readPos) - 2;
-      const latest = Math.floor(this.readPos) + this.capacity - 8;
+      // During a jump's fade-out, what counts is where the read position is going
+      const base = Math.floor(this.shiftPending ? this.readPos + this.pendingShift : this.readPos);
+      const earliest = base - 2;
+      const latest = base + this.capacity - 8;
       if (pos < earliest) from = Math.min(n, earliest - pos);
       if (pos + n > latest) to = Math.max(from, latest - pos);
       this.lateSamples += from;
@@ -168,7 +175,7 @@ export class PlayoutRing {
         outR[i] = 0;
         if (this.playing && !have) this.underrunSamples++;
       }
-      this.readPos = pos + this.step;
+      if (this.playing || this.gain > 0 || this.advanceWhileMuted) this.readPos = pos + this.step;
     }
   }
 

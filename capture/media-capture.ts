@@ -27,8 +27,17 @@ export interface MediaCaptureConfig extends CaptureConfig {
   sink: ICaptureSink;
   /** Topic/channel identifier for routing packets */
   topic?: string;
-  /** Audio timestamp offset to align with video (microseconds) */
+  /**
+   * Shift applied to the audio timestamps, in microseconds, to trim lip sync by hand. The
+   * tracks are put on one clock already; this is for a source whose audio is late or early.
+   */
   audioTimestampOffset?: number;
+  /**
+   * Capture this stream instead of the camera and microphone (a canvas, a screen, processed
+   * audio). The `video` and `audio` options still choose which of its tracks are sent. The
+   * caller keeps ownership: stop() leaves its tracks running.
+   */
+  mediaStream?: MediaStream;
 }
 
 /**
@@ -63,6 +72,8 @@ export class MediaCapture {
   private stats: CaptureStats = {
     videoFramesEncoded: 0,
     audioFramesEncoded: 0,
+    videoFramesDropped: 0,
+    audioFramesDropped: 0,
     bytesSent: 0,
     packetsSent: 0,
     videoBitrate: 0,
@@ -204,6 +215,10 @@ export class MediaCapture {
     if (this.stats.startTime > 0) {
       this.stats.duration = Date.now() - this.stats.startTime;
     }
+    if (this.encoder) {
+      this.stats.videoFramesDropped = this.encoder.videoFramesDropped;
+      this.stats.audioFramesDropped = this.encoder.audioFramesDropped;
+    }
     return { ...this.stats };
   }
 
@@ -236,7 +251,7 @@ export class MediaCapture {
       return;
     }
 
-    if (!MediaCapture.hasMediaDevices()) {
+    if (!this.config.mediaStream && !MediaCapture.hasMediaDevices()) {
       throw new Error('Media devices not available. Make sure you are using HTTPS.');
     }
 
@@ -262,7 +277,7 @@ export class MediaCapture {
         throw new Error('Must enable at least video or audio capture');
       }
 
-      this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      this.mediaStream = this.config.mediaStream ?? await navigator.mediaDevices.getUserMedia(constraints);
 
       // Extract metadata from tracks
       const videoTracks = this.mediaStream.getVideoTracks();
@@ -363,9 +378,11 @@ export class MediaCapture {
       this.encoder = undefined;
     }
 
-    // Stop media stream
+    // Stop the media stream, unless the caller handed it over
     if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach(track => track.stop());
+      if (this.mediaStream !== this.config.mediaStream) {
+        this.mediaStream.getTracks().forEach(track => track.stop());
+      }
       this.mediaStream = undefined;
     }
 

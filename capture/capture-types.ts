@@ -132,6 +132,10 @@ export interface CaptureStats {
   videoBitrate: number;
   /** Audio bitrate in bits per second, measured over the last stats interval */
   audioBitrate: number;
+  /** Video frames dropped because the encoder fell behind */
+  videoFramesDropped: number;
+  /** Audio chunks dropped because the encoder fell behind */
+  audioFramesDropped: number;
   /** Capture start time */
   startTime: number;
   /** Duration in ms */

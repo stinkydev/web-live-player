@@ -35,11 +35,13 @@ export interface PacketTimingEntry {
   isKeyframe: boolean;
   /** Decode latency (ms) */
   decodeLatencyMs: number;
+  /** How much later than the earliest-arriving packets this one arrived (ms); NaN if not known */
+  latenessMs: number;
   /** Whether frame was dropped */
   wasDropped: boolean;
 }
 
-const PACKET_HISTORY_SIZE = 300;   // ~5 seconds at 60fps
+const PACKET_HISTORY_SIZE = 600;   // 10 seconds at 60fps
 const LATENCY_HISTORY_SIZE = 60;   // ~1 second at 60fps
 
 export class PlaybackStats {
@@ -75,13 +77,14 @@ export class PlaybackStats {
         streamTimestampUs: 0,
         isKeyframe: false,
         decodeLatencyMs: 0,
+        latenessMs: NaN,
         wasDropped: false,
       };
     }
   }
 
   /** Record a decoded frame's packet. Its slot is in lastPacketIndex/lastPacketSeq. */
-  recordPacket(arrivalTime: number, timestampUs: number, isKeyframe: boolean, decodeTime: number): void {
+  recordPacket(arrivalTime: number, timestampUs: number, isKeyframe: boolean, decodeTime: number, latenessMs = NaN): void {
     const intervalMs = this.lastPacketArrivalTime !== null ? arrivalTime - this.lastPacketArrivalTime : 0;
     this.lastPacketArrivalTime = arrivalTime;
 
@@ -93,6 +96,7 @@ export class PlaybackStats {
     entry.streamTimestampUs = timestampUs;
     entry.isKeyframe = isKeyframe;
     entry.decodeLatencyMs = decodeTime - arrivalTime;
+    entry.latenessMs = latenessMs;
     entry.wasDropped = false;
     this.packetSeqs[index] = seq;
     this.packetWrite = (index + 1) % PACKET_HISTORY_SIZE;

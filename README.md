@@ -255,6 +255,14 @@ in 4MB chunks. This means:
 drain them via `getVideoFrame()`. Encoded samples for the whole file are retained to
 support seeking and looping.
 
+**Timing**: a `MediaClock` holds the playback position - running while playing, held while
+paused - and the file plays on it the way a live stream plays on its `LiveClock`: the picture
+is the frame due at it, the audio is placed by its timestamps and heard when due (resampled to
+the context's rate without drift, the audio device's own drift taken out). Edit lists are
+applied, so files with B-frames or AAC priming play in sync. A loop carries the timeline on,
+so it is as seamless as the middle of the file; in a background tab the audio keeps playing
+and the picture catches up from a keyframe on return.
+
 ## API Reference
 
 ### `createPlayer(config?)` / `LiveVideoPlayer`
@@ -351,7 +359,9 @@ Creates a file player instance for MP4 playback.
 **Config options (`FilePlayerConfig`):**
 - `preferredDecoder`: `'webcodecs-hw' | 'webcodecs-sw' | 'wasm'` - Decoder preference (default: `'webcodecs-sw'`)
 - `enableAudio`: `boolean` - Enable audio playback (default: `true`)
-- `audioContext`: `AudioContext` - Optional audio context (creates one if not provided)
+- `audioContext`: `AudioContext` - Optional audio context (creates one if not provided, when the file has audio)
+- `audioDestination`: `AudioNode` - Where the audio goes (default: the context's destination)
+- `displayLatencyMs`: `number` - How far ahead of the `getVideoFrame()` call frames are picked; by default 1.5 render intervals, as for the live player
 - `playMode`: `'once' | 'loop'` - Play mode (default: `'once'`)
 - `maxBufferedFrames`: `number` - Decoded frames to hold ahead of the playback position (default: `60`, floor of 3)
 - `debugLogging`: `boolean` - Enable debug logging
@@ -362,11 +372,11 @@ Creates a file player instance for MP4 playback.
 - `loadFromFile(file: File): Promise<MP4FileInfo>` - Load MP4 from a `File`
 - `play()` - Start playback. After `'ended'`, restarts from the beginning.
 - `pause()` - Pause playback
-- `seek(timeSeconds: number)` - Seek to the nearest keyframe at or before the target
-- `getVideoFrame(): VideoFrame | null` - Frame for the current position. Player-owned.
+- `seek(timeSeconds: number)` - Seek to that time: decoding starts at the keyframe before it, and the first frame shown is the one at the target
+- `getVideoFrame(): VideoFrame | null` - The frame due while it will be on screen. Player-owned.
 - `getPosition(): number` / `getDuration(): number` - Position and duration in seconds
 - `getFileInfo(): MP4FileInfo | null` - Metadata of the loaded file
-- `getStats(): FilePlayerStats` - `{ duration, position, bufferSize, width, height, frameRate, codec, state }`
+- `getStats(): FilePlayerStats` - `{ duration, position, bufferSize, width, height, frameRate, codec, state, audio }`, `audio` being the audio player's `FileAudioStats` (or null)
 - `setVolume(volume: number)` / `getVolume(): number` - Audio volume, 0-1
 - `setPlayMode(mode: FilePlayMode)` / `getPlayMode()` - Play mode; `setLoop(boolean)` is deprecated
 - `setDebugLogging(enabled: boolean)` - Toggle debug logging
@@ -398,7 +408,7 @@ Creates a file player instance for MP4 playback.
 | `bandwidth` | `BandwidthStats \| null` |
 | `sync` | `SyncStats` |
 
-`LatencyStats` holds `decodeLatency`, `bufferLatency`, `totalLatency` and their
+`LatencyStats` holds `decodeLatency` (arrival to decoded), `bufferLatency` (decoded to on screen, at the moment the frame was picked for) and `totalLatency` (arrival to on screen), and their
 `avg*` counterparts, in milliseconds rounded to 0.1, averaged over roughly the last
 second of frames.
 
@@ -412,8 +422,9 @@ frames that finished decoding after their time; and `audio`, the audio player's
 `LiveAudioStats`.
 
 `PacketTimingEntry` (from `getPacketTimingHistory()`) holds `arrivalTime`,
-`intervalMs`, `streamTimestampUs`, `isKeyframe`, `decodeLatencyMs` and `wasDropped`.
-Entries are copies, safe to retain.
+`intervalMs`, `streamTimestampUs`, `isKeyframe`, `decodeLatencyMs`, `latenessMs` (how much
+later than the earliest-arriving packets it came: the network's jitter) and `wasDropped`.
+Entries are copies, safe to retain; the history holds the last 600 frames.
 
 ### Stream Sources
 
@@ -555,9 +566,14 @@ clock either way); `clear()`; `setBufferDelay(ms)` (the clock's delay); `setVolu
 `getClock()`; `audiblePtsAt(perfMs?)`; `getStats(): LiveAudioStats`; `dispose()`. Decodes Opus and
 AAC; PCM is not supported.
 
-`FileAudioPlayer(context, { sampleRate?, channels? })` -
-`init(codec, sampleRate, channels, description?)`,
-`decode(data, timestamp, duration)`, and the same playback controls.
+`FileAudioPlayer(context, { clock, destination? })` (`FileAudioConfig`) plays a file's audio on a
+clock - an `AudioClock`, which a `MediaClock` is - and holds its place while muted.
+`init(codec, sampleRate, channels, description?)` (`'Opus'` as mp4box names it is accepted),
+`decode(data, timestampUs, durationUs?)`, `start()`, `stop()`, `clear()`, `resync()` (after
+the clock jumps, before feeding the new position), `setVolume()`, `audiblePtsAt()`,
+`getStats()` and `dispose()`.
+
+`MediaClock` - `play()`, `pause()`, `seek(ptsUs)`, `ptsAt(perfMs?)`, `isPlaying`.
 
 ### `BasePlayer<TState>`
 
@@ -666,7 +682,14 @@ nothing is being published.
 - `statsInterval`: `number` - How often `'stats'` is emitted and bitrates are recomputed, in ms (default: `1000`)
 - `sink`: `ICaptureSink` - Required transport
 - `topic`: `string` - Written to the packet's routing metadata
-- `audioTimestampOffset`: `number` - Microseconds added to audio timestamps, to align A/V
+- `audioTimestampOffset`: `number` - Microseconds added to audio timestamps, to trim lip sync by hand for a source whose audio is late or early
+- `mediaStream`: `MediaStream` - Capture this stream instead of the camera and microphone (a canvas, a screen, processed audio). `video` and `audio` still choose which of its tracks are sent; the caller keeps ownership and `stop()` leaves its tracks running.
+
+The browser stamps each captured track on a clock of its own - in Chrome the camera's and the
+microphone's are hours apart - so the encoders put both on the wall clock as frames are
+delivered, and the published audio and video timestamps line up. An encoder that falls behind
+drops frames instead of queueing them (counted in `videoFramesDropped` / `audioFramesDropped`),
+so latency stays put.
 
 Codecs come from `CodecType`. Supported for capture: VP8, VP9, H.264 (AVC), HEVC,
 AV1, Opus and AAC. The wire header advertises the codec you configured, along with
@@ -677,11 +700,11 @@ streams.
 
 ### Capture API
 
-- `start()` / `stop()` - Begin and end capture. `stop()` releases the media tracks.
+- `start()` / `stop()` - Begin and end capture. `stop()` releases the media tracks it opened (not those of a `mediaStream` passed in).
 - `pause()` / `resume()` - Stop and restart publishing without tearing anything down. Encoding continues while paused, so timestamps stay continuous and the camera permission stays live; encoded chunks are simply not handed to the sink, and they are not counted in stats. `resume()` requests a keyframe so the receiver recovers immediately.
 - `requestKeyframe()` - Force a keyframe on the next encoded frame. Sinks call this when a subscriber joins or the server asks.
 - `getState(): CaptureState` - `'idle' | 'initializing' | 'capturing' | 'paused' | 'stopped' | 'error'`
-- `getStats(): CaptureStats` - `videoFramesEncoded`, `audioFramesEncoded`, `bytesSent`, `packetsSent`, `videoBitrate`, `audioBitrate`, `startTime`, `duration`. Frame and byte counters are cumulative across start/stop cycles; the bitrates are bits per second measured over the last `statsInterval`, counting encoded payload without wire framing. Poll it, or subscribe to `'stats'`.
+- `getStats(): CaptureStats` - `videoFramesEncoded`, `audioFramesEncoded`, `videoFramesDropped`, `audioFramesDropped`, `bytesSent`, `packetsSent`, `videoBitrate`, `audioBitrate`, `startTime`, `duration`. Frame and byte counters are cumulative across start/stop cycles; the bitrates are bits per second measured over the last `statsInterval`, counting encoded payload without wire framing. Poll it, or subscribe to `'stats'`.
 - `getMediaStream(): MediaStream | undefined` - The captured stream, for a local preview
 - `setMoQSession(session)` - Inject an existing `MoqSessionBroadcaster` into a MoQ sink
 - `dispose()` - Release everything, including the sink
@@ -966,6 +989,7 @@ Multi-user video chat combining capture and playback.
 ### [A/V Sync Test](demo/sync/)
 Measures lip sync end to end.
 - Publishes a test pattern: a flash and a beep with the same timestamp, once a second
+- Or publishes through `MediaCapture`: a canvas flash with a Web Audio beep, or the camera and microphone
 - Plays it (or any flash-and-beep stream) back and times each flash on screen against its beep at the audio output
 - Both player setups: a `LiveVideoPlayer` with its own audio, or separate players on a shared `LiveClock`
 

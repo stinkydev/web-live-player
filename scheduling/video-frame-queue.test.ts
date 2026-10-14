@@ -111,11 +111,11 @@ describe('PlaybackStats', () => {
 
   it('returns packet history oldest first, capped to the most recent', () => {
     const stats = new PlaybackStats();
-    for (let i = 0; i < 350; i++) stats.recordPacket(i * 20, i * 20_000, i % 50 === 0, i * 20 + 5);
+    for (let i = 0; i < 650; i++) stats.recordPacket(i * 20, i * 20_000, i % 50 === 0, i * 20 + 5);
     const history = stats.getPacketTimingHistory();
-    expect(history.length).toBe(300);
+    expect(history.length).toBe(600);
     expect(history[0].streamTimestampUs).toBe(50 * 20_000);
-    expect(history[299].streamTimestampUs).toBe(349 * 20_000);
+    expect(history[599].streamTimestampUs).toBe(649 * 20_000);
     expect(history[1].intervalMs).toBe(20);
     expect(history[0].decodeLatencyMs).toBe(5);
   });
@@ -127,7 +127,7 @@ describe('PlaybackStats', () => {
     const seq = stats.lastPacketSeq;
     stats.markDropped(index, seq);
     expect(stats.getPacketTimingHistory()[0].wasDropped).toBe(true);
-    for (let i = 1; i <= 300; i++) stats.recordPacket(i, i, false, i);
+    for (let i = 1; i <= 600; i++) stats.recordPacket(i, i, false, i);
     stats.markDropped(index, seq);
     expect(stats.getPacketTimingHistory().some((e) => e.wasDropped)).toBe(false);
   });

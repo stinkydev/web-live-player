@@ -17,6 +17,8 @@ export { BasePlayer } from './player/base-player';
 export type { BasePlayerConfig } from './player/base-player';
 
 export { LiveVideoPlayer, createPlayer } from './player/live-player';
+export { StatsOverlay } from './player/stats-overlay';
+export type { StatsOverlayOptions } from './player/stats-overlay';
 export type { PlayerConfig, PlayerStats, PlayerState, BandwidthStats, SyncStats } from './player/live-player';
 
 export { FileVideoPlayer, createFilePlayer } from './player/file-player';
@@ -29,7 +31,8 @@ export type { WebSocketSourceConfig } from './sources/websocket-source';
 
 // File sources
 export { MP4FileSource } from './sources/mp4-file-source';
-export type { MP4FileInfo, DecodableSample, MP4FileSourceEvents } from './sources/mp4-file-source';
+export { editListOffsetUs } from './sources/mp4-file-source';
+export type { MP4FileInfo, DecodableSample, MP4FileSourceEvents, EditListEntry } from './sources/mp4-file-source';
 
 // Decoders
 export { WebCodecsDecoder } from './decoders/webcodecs-decoder';
@@ -41,11 +44,14 @@ export { isVideoFrame, isYUVFrame } from './decoders/decoder-interface';
 
 // Audio
 export { FileAudioPlayer } from './audio/file-audio-player';
-export { LiveAudioPlayer, AUDIO_MIN_DELAY_MS } from './audio/live-audio-player';
+export type { FileAudioConfig, FileAudioStats } from './audio/file-audio-player';
+export type { AudioClock, AudioOutputStats, AudioOutputState } from './audio/clocked-audio-output';
+export { LiveAudioPlayer } from './audio/live-audio-player';
 export type { LiveAudioConfig, LiveAudioStats, LiveAudioState } from './audio/live-audio-player';
 
 // Synchronization
 export { LiveClock, DEFAULT_BUFFER_DELAY_MS } from './sync/live-clock';
+export { MediaClock } from './sync/media-clock';
 export type { LiveClockConfig, LiveClockStats } from './sync/live-clock';
 
 // Utilities

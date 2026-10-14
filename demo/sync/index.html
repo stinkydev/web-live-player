@@ -21,7 +21,7 @@
     input[type=number] { width: 80px; }
     button { background: #4ecdc4; color: #1a1a2e; border: 0; border-radius: 4px; padding: 8px 16px; font-weight: 600; cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: default; }
-    canvas { background: #000; width: 480px; height: 270px; display: block; margin-top: 12px; }
+    canvas { background: #000; width: 640px; height: 360px; display: block; margin-top: 12px; }
     .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 12px; }
     .stat { background: #0f1729; border-radius: 4px; padding: 8px; }
     .stat b { display: block; font-size: 18px; color: #4ecdc4; }
@@ -41,6 +41,7 @@
   <div class="panel">
     <label>Relay <input type="text" id="relay" value="https://r1.moq.sesame-streams.com:4433"></label>
     <label>Namespace <input type="text" id="namespace"></label><br>
+    <label>MP4 URL <input type="text" id="file" placeholder="play a file instead of the namespace"></label><br>
     <label>Buffer (ms) <input type="number" id="buffer" value="150"></label>
     <label>Players <select id="mode">
       <option value="standalone">LiveVideoPlayer with its own audio</option>
@@ -48,12 +49,13 @@
     </select></label>
     <label>Publish <select id="publish">
       <option value="pattern">test pattern (flash + beep)</option>
-      <option value="capture">camera + microphone through MediaCapture</option>
+      <option value="capture-pattern">test pattern through MediaCapture (canvas + Web Audio)</option>
+      <option value="camera">camera + microphone through MediaCapture</option>
       <option value="off">nothing - play the namespace as it is</option>
     </select></label><br>
     <button id="start">Start</button>
     <button id="stop" disabled>Stop</button>
-    <canvas id="view" width="480" height="270"></canvas>
+    <canvas id="view" width="640" height="360"></canvas>
     <div class="stats" id="stats"></div>
     <pre id="log"></pre>
   </div>
