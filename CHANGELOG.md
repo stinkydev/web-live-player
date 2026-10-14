@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **Audio steps exactly on wall-clock timelines.** Streams from `MediaCapture` are stamped on the
+  wall clock, which puts the worklet's read position near 1e14 samples - where a double cannot
+  hold the fraction of a resampling step. On a 44.1 kHz device audio ran 0.5% fast and the
+  follower's corrections came in coarse 1.4% jumps. The read position is now a whole sample and
+  a fraction.
+- **A gap in the audio no longer throws away the audio before it.** Restarting the decoder at a
+  gap discarded what it still held, so a burst of packets (a subscription's backlog, a file's
+  feed) lost everything before the gap. The decoder now finishes what it holds first, and
+  packets arriving meanwhile wait in order. A seek still discards at once.
+- **40 and 60 ms Opus packets are no longer taken for gaps.** Packet length was assumed to be
+  20 ms until something decoded; it is now read from the Opus header (or the AAC frame size),
+  or taken from the duration given.
+- **A buffer delay of seconds keeps its audio.** The worklet's ring held 2.7 s and dropped audio
+  written further ahead; it now grows (up to 43 s at 48 kHz).
+- **Long buffer delays keep their video.** The live player held at most 30 decoded frames, so
+  at 50 fps a delay of 1 s dropped frames before their turn and the picture froze. The queue now
+  holds what the clock's delay spans at the stream's frame rate (up to 240 frames).
+- **Two seeks during one fade-out go to the second**, rather than adding up.
+- **`MediaCapture` drop counts carry over a stop and a start**, like its other counters.
+- **MP4 duration follows the edit list**, so a file with a leading empty edit plays to its end
+  and loops at the right point.
+
+### Changed
+
+- `LiveAudioPlayer.decode()` requires a timestamp: a packet without one cannot be placed and is
+  dropped (with a warning, once). The old fallback could never start.
+
+### Added
+
+- `presentationDurationS()`, the edit list's presentation duration.
+
 ## 0.2.0
 
 Live playback is rebuilt around a clock that audio and video share. See "Timing and A/V Sync"
@@ -76,6 +111,11 @@ in the README.
 - **Decoded audio keeps its timestamps across a gap.** Chrome's `AudioDecoder` stamps its output
   by counting samples from the first chunk, so after packets were lost or skipped every chunk
   came out early by the gap. The decoder restarts at a gap.
+- **A small buffer delay no longer breaks audio or sync.** The audio output renders ahead of what
+  is heard (40-60 ms in Chrome) and the video decoder takes its time, both before any network
+  jitter: below those, audio chunks were dropped and video showed late. Each player now reports
+  what it needs to its clock (`setMinimumDelay`), and the clock runs at the larger of the buffer
+  delay and that. Network lateness never raises it.
 
 ### Added
 
@@ -92,6 +132,13 @@ in the README.
 - A/V sync test demo (`demo/sync`): publishes a flash-and-beep test pattern - directly, or
   through `MediaCapture` - and measures lip sync of it, or of any flash-and-beep stream, at the
   screen and the speakers.
+- `StatsOverlay`: a diagnostic panel for a `LiveVideoPlayer`, drawn into a canvas of its own -
+  the delay asked for and the one the clock runs at, what video and audio need, latency, network
+  jitter, A/V sync and late frames, over a graph of when each frame was ready against when it
+  had to be. The player demo has it as a checkbox.
+- `LiveClock.setMinimumDelay()` / `clearMinimumDelay()` / `getEffectiveDelay()`; `SyncStats`
+  gains `effectiveDelayMs`, `minimumDelayMs`, `videoMinimumDelayMs` and `displayLeadMs`, the
+  audio stats `outputLeadMs` and `minimumDelayMs`, and `PacketTimingEntry` `latenessMs`.
 
 ### Changed
 

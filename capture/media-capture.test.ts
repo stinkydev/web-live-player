@@ -78,6 +78,15 @@ describe('MediaCapture', () => {
   });
 
   describe('statistics', () => {
+    it('keeps drop counts across a stop and a new encoder', async () => {
+      const c = capture as any;
+      c.state = 'capturing';
+      c.encoder = { videoFramesDropped: 3, audioFramesDropped: 1, dispose() {} };
+      await capture.stop();
+      c.encoder = { videoFramesDropped: 2, audioFramesDropped: 0, dispose() {} };
+      expect(capture.getStats()).toMatchObject({ videoFramesDropped: 5, audioFramesDropped: 1 });
+    });
+
     it('counts frames and bytes per media type', () => {
       feed(fakeChunk('video', 1000));
       feed(fakeChunk('audio', 100));

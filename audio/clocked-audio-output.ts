@@ -15,6 +15,7 @@
  */
 
 import { registerWorklet } from './worklet-registry';
+import { packetDurationUs } from './packet-duration';
 import WORKLET_SOURCE from './live-audio.worklet.ts?worklet-source';
 
 const PROCESSOR_NAME = 'live-audio-playout';
@@ -172,10 +173,18 @@ export class ClockedAudioOutput {
   private baseStep = 1;
   private nextPos = NaN;
   private lastPtsUs = NaN;
-  /** Duration of the last decoded chunk, to tell a gap in the input from the next chunk */
+  /** Where the last packet given to decode() ends, to tell a gap in the input from the next packet */
+  private expectedNextUs = NaN;
+  private lastInputDurationUs = 20_000;
+  /** Duration of the last decoded chunk: the fallback for packets whose own cannot be told */
   private chunkDurationUs = 20_000;
   private decoderConfig: AudioDecoderConfig | null = null;
   private decoderResets = 0;
+  // A restart at a gap waits for what the decoder holds; packets arriving meanwhile wait in order
+  private restarting = false;
+  private held: { data: Uint8Array; timestampUs: number; durationUs: number }[] = [];
+  /** Bumped by clear() and dispose(), so a restart they overtook does nothing when it lands */
+  private generation = 0;
 
   // Following the clock
   private lastReport: PlayoutReport | null = null;
@@ -251,36 +260,75 @@ export class ClockedAudioOutput {
     this.configured = true;
   }
 
-  /** Queue an encoded chunk with its timestamp (and duration, if known) in microseconds. */
+  /**
+   * Queue an encoded chunk with its timestamp (and duration, if known) in microseconds. Without a
+   * duration, it is read from the packet (Opus) or the codec's frame size (AAC).
+   */
   decode(data: Uint8Array, timestampUs: number, durationUs?: number): void {
     if (!this.configured || !this.decoder || this.decoder.state !== 'configured' || data.length < 1) {
       return;
     }
+    const config = this.decoderConfig!;
+    const duration = durationUs ?? packetDurationUs(config.codec, data, config.sampleRate) ?? this.chunkDurationUs;
 
     // The decoder stamps its output by counting samples from the first chunk it was given,
-    // whatever the timestamps of the chunks after it: across a gap in the input (packets lost
-    // or skipped, a seek) every later chunk would come out early. Restarting the decoder makes it
-    // take the next timestamp as given.
-    if (this.lastPtsUs === this.lastPtsUs) {
-      const step = timestampUs - this.lastPtsUs;
-      if (step < this.chunkDurationUs / 2 || step > this.chunkDurationUs * 1.5) {
-        this.restartDecoder();
-      }
-    }
+    // whatever the timestamps of the chunks after it: across a gap in the input (packets lost or
+    // skipped) every later chunk would come out early. So at a gap the decoder is restarted, to
+    // take the next timestamp as given - once what it already holds has come out.
+    const gap = this.expectedNextUs === this.expectedNextUs &&
+      Math.abs(timestampUs - this.expectedNextUs) > this.lastInputDurationUs / 2;
     this.lastPtsUs = timestampUs;
+    this.expectedNextUs = timestampUs + duration;
+    this.lastInputDurationUs = duration;
 
+    if (gap && !this.restarting) this.restartAfterFlush();
+    if (this.restarting) {
+      this.held.push({ data, timestampUs, durationUs: duration });
+      return;
+    }
+    this.submit(data, timestampUs, duration);
+  }
+
+  private submit(data: Uint8Array, timestampUs: number, durationUs: number): void {
     try {
-      this.decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: timestampUs, duration: durationUs, data }));
+      this.decoder?.decode(new EncodedAudioChunk({ type: 'key', timestamp: timestampUs, duration: durationUs, data }));
     } catch (error) {
       console.error(`${this.name}: error decoding audio:`, error);
     }
   }
 
-  private restartDecoder(): void {
-    if (!this.decoder || !this.decoderConfig || this.decoder.state !== 'configured') return;
-    this.decoder.reset();
-    this.decoder.configure(this.decoderConfig);
-    this.decoderResets++;
+  /** Let the decoder finish what it holds, restart it, then hand it what waited meanwhile */
+  private restartAfterFlush(): void {
+    const decoder = this.decoder;
+    const config = this.decoderConfig;
+    if (!decoder || !config) return;
+    const generation = this.generation;
+    this.restarting = true;
+    decoder.flush().catch(() => {}).then(() => {
+      if (generation !== this.generation || this.decoder !== decoder) return;
+      if (decoder.state === 'configured') {
+        decoder.reset();
+        decoder.configure(config);
+        this.decoderResets++;
+      }
+      this.restarting = false;
+      const held = this.held;
+      this.held = [];
+      for (const p of held) this.submit(p.data, p.timestampUs, p.durationUs);
+    });
+  }
+
+  /** Throw away what the decoder holds and start the next packet afresh (a seek, a reset) */
+  private discardDecoding(): void {
+    this.generation++;
+    this.restarting = false;
+    this.held = [];
+    this.lastPtsUs = NaN;
+    this.expectedNextUs = NaN;
+    if (this.decoder && this.decoderConfig && this.decoder.state === 'configured') {
+      this.decoder.reset();
+      this.decoder.configure(this.decoderConfig);
+    }
   }
 
   private handleDecodedFrame(frame: AudioData): void {
@@ -482,8 +530,9 @@ export class ClockedAudioOutput {
     this.workletNode?.port.postMessage({ type: 'playing', value: false });
   }
 
-  /** Drop the buffered audio (for a reset, a reconnect or a seek). */
+  /** Drop the buffered audio and whatever is decoding (for a reset, a reconnect or a seek). */
   clear(): void {
+    this.discardDecoding();
     this.nextPos = NaN;
     this.workletNode?.port.postMessage({ type: 'clear' });
   }
@@ -496,6 +545,8 @@ export class ClockedAudioOutput {
   dispose(): void {
     this.configured = false;
     this.started = false;
+    this.generation++;
+    this.held = [];
 
     if (this.decoder) {
       try {

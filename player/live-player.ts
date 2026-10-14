@@ -30,8 +30,12 @@ import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputin
  */
 const MAX_DECODE_QUEUE = 512;
 
-/** Decoded frames held for display. They hold decoder memory, so few; the clock trims what is due. */
+/**
+ * Decoded frames held for display: at least this many, and enough for the clock's delay at the
+ * stream's frame rate (with room for a burst), up to the most. They hold decoder memory.
+ */
 const FRAME_QUEUE_CAPACITY = 30;
+const FRAME_QUEUE_MAX = 240;
 
 /** Weight of the newest sample in the averaged statistics */
 const STATS_SMOOTHING = 0.1;
@@ -1224,6 +1228,10 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       // Before the clock starts, the backlog a subscription opens with is already behind it
       if (due === null) due = this.clock.targetAt(decodeTime);
     }
+
+    // Hold every frame the delay spans, or frames are dropped before their turn (1 s at 50 fps is 50)
+    const needed = Math.min(FRAME_QUEUE_MAX, Math.ceil(((this.clock.getEffectiveDelay() + 200) / 1000) * this.estimatedFrameRate) + 4);
+    if (needed > this.frameQueue.maxSize) this.frameQueue.setCapacity(needed);
 
     this.frameQueue.push(frame, timestampUs, arrivalTime, decodeTime, due,
       this.playbackStats.lastPacketIndex, this.playbackStats.lastPacketSeq);

@@ -89,6 +89,19 @@ describe('VideoFrameQueue', () => {
     expect(ids).toEqual([...Array(50).keys()]);
   });
 
+  it('grows, keeping the frames queued in order', () => {
+    const small = new VideoFrameQueue<MockFrame>({ capacity: 4, onDrop: (frame, reason) => drops.push({ id: frame.id, reason }) });
+    // six into four: 0 and 1 overflow, and the ring has wrapped
+    for (let i = 0; i < 6; i++) small.push({ id: i }, i * 20_000, 0, 0, null);
+    small.setCapacity(8);
+    for (let i = 6; i < 10; i++) small.push({ id: i }, i * 20_000, 0, 0, null);
+    expect(small.maxSize).toBe(8);
+    expect(drops.filter((d) => d.reason === 'overflow').map((d) => d.id)).toEqual([0, 1]);
+    // all eight still there, oldest first
+    expect(small.take(200_000)?.id).toBe(9);
+    expect(drops.filter((d) => d.reason === 'skip').map((d) => d.id)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+  });
+
   it('clear() reports every frame', () => {
     push(1, 0);
     push(2, 20_000);

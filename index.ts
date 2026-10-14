@@ -31,7 +31,7 @@ export type { WebSocketSourceConfig } from './sources/websocket-source';
 
 // File sources
 export { MP4FileSource } from './sources/mp4-file-source';
-export { editListOffsetUs } from './sources/mp4-file-source';
+export { editListOffsetUs, presentationDurationS } from './sources/mp4-file-source';
 export type { MP4FileInfo, DecodableSample, MP4FileSourceEvents, EditListEntry } from './sources/mp4-file-source';
 
 // Decoders

@@ -65,6 +65,20 @@ export function editListOffsetUs(entries: EditListEntry[] | undefined, movieTime
 }
 
 /**
+ * How long a track presents, in seconds: the edits of its edit list added up (in the movie
+ * timescale), or its media duration when it has none.
+ */
+export function presentationDurationS(entries: EditListEntry[] | undefined, movieTimescale: number,
+  mediaDuration: number, mediaTimescale: number): number {
+  if (entries && entries.length > 0 && movieTimescale > 0) {
+    let total = 0;
+    for (const entry of entries) total += entry.segment_duration;
+    if (total > 0) return total / movieTimescale;
+  }
+  return mediaTimescale > 0 ? mediaDuration / mediaTimescale : 0;
+}
+
+/**
  * Event handlers for MP4FileSource
  */
 export interface MP4FileSourceEvents {
@@ -88,6 +102,7 @@ export class MP4FileSource {
   // Edit list offsets of the tracks, in µs
   private videoOffsetUs = 0;
   private audioOffsetUs = 0;
+  private videoDurationS = 0;
   
   // Sample extraction state
   private nextVideoSampleIndex: number = 0;
@@ -538,7 +553,9 @@ export class MP4FileSource {
       // Extract video description for decoder config
       const trak = this.mp4File?.getTrackById(this.videoTrackId);
       if (trak) {
-        this.videoOffsetUs = editListOffsetUs((trak as any).edts?.elst?.entries, info.timescale, this.videoTrack.timescale);
+        const edits = (trak as any).edts?.elst?.entries;
+        this.videoOffsetUs = editListOffsetUs(edits, info.timescale, this.videoTrack.timescale);
+        this.videoDurationS = presentationDurationS(edits, info.timescale, this.videoTrack.duration, this.videoTrack.timescale);
         const entry = trak.mdia?.minf?.stbl?.stsd?.entries?.[0];
         if (entry) {
           // Get avcC or hvcC box for codec description
@@ -613,7 +630,8 @@ export class MP4FileSource {
     
     // Build file info
     this.fileInfo = {
-      duration: this.videoTrack.duration / this.videoTrack.timescale,
+      // The edit list's, when there is one: a leading empty edit lengthens it, a trimmed start shortens it
+      duration: this.videoDurationS || this.videoTrack.duration / this.videoTrack.timescale,
       timescale: this.videoTrack.timescale,
       width: this.videoTrack.video?.width ?? 0,
       height: this.videoTrack.video?.height ?? 0,
@@ -784,6 +802,9 @@ export class MP4FileSource {
     this.fileInfo = null;
     this.videoTrack = null;
     this.audioTrack = null;
+    this.videoOffsetUs = 0;
+    this.audioOffsetUs = 0;
+    this.videoDurationS = 0;
     this.videoDescription = null;
     this.audioDescription = null;
     this.isProgressiveLoading = false;

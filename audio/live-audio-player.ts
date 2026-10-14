@@ -35,6 +35,7 @@ export class LiveAudioPlayer {
   private readonly now: () => number;
   private readonly output: ClockedAudioOutput;
   private timebase: Timebase = MICROSECOND_TIMEBASE;
+  private warnedNoTimestamp = false;
 
   constructor(context: AudioContext, config: LiveAudioConfig = {}) {
     this.clock = config.clock ?? new LiveClock({ bufferDelayMs: config.bufferDelayMs ?? DEFAULT_BUFFER_DELAY_MS });
@@ -81,18 +82,20 @@ export class LiveAudioPlayer {
   }
 
   /**
-   * Queue an encoded audio packet.
+   * Queue an encoded audio packet. Packets are placed by their timestamps, so one without a
+   * timestamp cannot be played and is dropped.
    *
    * @param ptsUs - Presentation timestamp in microseconds (number, bigint or Long)
    * @param arrivalMs - When the packet arrived, on the performance.now() timeline (default: now)
    */
-  decode(data: Uint8Array, ptsUs?: PtsValue, arrivalMs?: number): void {
+  decode(data: Uint8Array, ptsUs: PtsValue, arrivalMs?: number): void {
     if (!this.output.isConfigured || data.length < 1) return;
 
     if (ptsUs === undefined || ptsUs === null) {
-      // No timestamp: carry on from the previous packet without telling the clock
-      const last = this.output.lastTimestampUs;
-      if (last === last) this.output.decode(data, last + 20_000);
+      if (!this.warnedNoTimestamp) {
+        this.warnedNoTimestamp = true;
+        console.warn('LiveAudioPlayer: dropping audio packets without a timestamp');
+      }
       return;
     }
 
@@ -108,8 +111,7 @@ export class LiveAudioPlayer {
   decodeFrame(frame: ParsedFrame, arrivalMs?: number): void {
     if (!frame.payload || !frame.header) return;
     const pts = frame.header.media?.pts;
-    const ptsUs = pts === undefined || pts === null ? undefined : rescaleTime(pts, this.timebase, MICROSECOND_TIMEBASE);
-    this.decode(frame.payload, ptsUs, arrivalMs);
+    this.decode(frame.payload, pts === undefined || pts === null ? undefined : rescaleTime(pts, this.timebase, MICROSECOND_TIMEBASE), arrivalMs);
   }
 
   /**

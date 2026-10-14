@@ -91,6 +91,43 @@ describe('PlayoutRing', () => {
     expect(ring.lateSamples).toBe(0);
   });
 
+  it('steps exactly at wall-clock positions (1e14 samples), where a double alone cannot', () => {
+    const ring = new PlayoutRing({ outputRate: 44100 });
+    const start = 86_000_000_000_000;
+    ring.step = 48000 / 44100;
+    ring.seek(start);
+    const l = new Float32Array(441);
+    const r = new Float32Array(441);
+    for (let i = 0; i < 100; i++) ring.render(l, r);   // one second of output
+    // one second of stream; a lone double would have stepped by 1.09375 and read 48 234
+    expect(ring.readPos - start).toBeCloseTo(48000, 1);
+  });
+
+  it('takes the latest of two seeks made during one fade-out', () => {
+    const ring = new PlayoutRing({ outputRate: RATE, fadeMs: 1 });
+    ring.write(0, ramp(0, 2000), null);
+    ring.seek(0);
+    ring.playing = true;
+    renderQuanta(ring, 2);
+    ring.seek(10_000);
+    ring.seek(20_000);
+    renderQuanta(ring, 1);
+    // the fade-out ran 48 samples, then the jump: to 20 000 plus what was read since
+    expect(ring.readPos).toBeGreaterThan(20_000);
+    expect(ring.readPos).toBeLessThan(20_200);
+  });
+
+  it('grows to hold audio written further ahead than it does', () => {
+    const ring = new PlayoutRing({ outputRate: RATE, capacityLog2: 12 });
+    ring.write(0, ramp(0, 960), null);
+    ring.seek(0);
+    expect(ring.write(10_000, ramp(10_000, 960), null)).toBe(960);
+    expect(ring.overflowSamples).toBe(0);
+    expect(ring.capacity).toBeGreaterThanOrEqual(16384);
+    // what was there before the growth is still there
+    expect(ring.bufferedAhead()).toBe(960);
+  });
+
   it('never plays a slot left over from an earlier lap', () => {
     const ring = new PlayoutRing({ outputRate: RATE, capacityLog2: 12, fadeMs: 1 });
     ring.write(100, sine(100, 960, 440), null);

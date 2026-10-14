@@ -561,7 +561,7 @@ clock of its own, default 150), `destination` (default: the context's destinatio
 
 Methods: `init(codecData)`; `decodeFrame(frame, arrivalMs?)`, which takes the timestamp in the
 timebase of the codec data given to `init()`, or `decode(payload, ptsUs, arrivalMs?)` with the
-timestamp in microseconds; `start()` and `stop()` to make it heard or mute it (it keeps to the
+timestamp in microseconds (a packet without one is dropped); `start()` and `stop()` to make it heard or mute it (it keeps to the
 clock either way); `clear()`; `setBufferDelay(ms)` (the clock's delay); `setVolume(0-1)`;
 `getClock()`; `audiblePtsAt(perfMs?)`; `getStats(): LiveAudioStats`; `dispose()`. Decodes Opus and
 AAC; PCM is not supported.

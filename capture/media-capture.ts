@@ -68,6 +68,9 @@ export class MediaCapture {
   private lastVideoBytesSent = 0;
   private lastAudioBytesSent = 0;
 
+  // Frames dropped by encoders since stopped
+  private droppedBefore = { video: 0, audio: 0 };
+
   // Stats tracking
   private stats: CaptureStats = {
     videoFramesEncoded: 0,
@@ -215,10 +218,9 @@ export class MediaCapture {
     if (this.stats.startTime > 0) {
       this.stats.duration = Date.now() - this.stats.startTime;
     }
-    if (this.encoder) {
-      this.stats.videoFramesDropped = this.encoder.videoFramesDropped;
-      this.stats.audioFramesDropped = this.encoder.audioFramesDropped;
-    }
+    // Counts of encoders stopped earlier, plus the running one's
+    this.stats.videoFramesDropped = this.droppedBefore.video + (this.encoder?.videoFramesDropped ?? 0);
+    this.stats.audioFramesDropped = this.droppedBefore.audio + (this.encoder?.audioFramesDropped ?? 0);
     return { ...this.stats };
   }
 
@@ -372,8 +374,10 @@ export class MediaCapture {
     this.stopStatsTimer();
     this.paused = false;
 
-    // Stop encoder
+    // Stop encoder, keeping its drop counts: the stats are cumulative over restarts
     if (this.encoder) {
+      this.droppedBefore.video += this.encoder.videoFramesDropped;
+      this.droppedBefore.audio += this.encoder.audioFramesDropped;
       this.encoder.dispose();
       this.encoder = undefined;
     }

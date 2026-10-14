@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { MP4FileSource, editListOffsetUs } from './mp4-file-source';
+import { MP4FileSource, editListOffsetUs, presentationDurationS } from './mp4-file-source';
 
 describe('MP4FileSource', () => {
   let source: MP4FileSource;
@@ -349,6 +349,16 @@ describe('MP4FileSource', () => {
     it('should return null for audioDescription before loading', () => {
       expect(source.getAudioDescription()).toBeNull();
     });
+  });
+});
+
+describe('presentationDurationS', () => {
+  it('adds up the edits, an empty one included', () => {
+    expect(presentationDurationS([{ segment_duration: 500, media_time: -1 }, { segment_duration: 9_500, media_time: 0 }], 1000, 285_000, 30_000)).toBe(10);
+  });
+
+  it('falls back to the media duration without edits', () => {
+    expect(presentationDurationS(undefined, 1000, 285_000, 30_000)).toBe(9.5);
   });
 });
 

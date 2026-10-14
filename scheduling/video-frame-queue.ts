@@ -69,6 +69,25 @@ export class VideoFrameQueue<T> {
     return this.count;
   }
 
+  /** Frames the queue holds before it drops the oldest */
+  get maxSize(): number {
+    return this.capacity;
+  }
+
+  /** Hold up to `capacity` frames, keeping those queued. The queue never shrinks. */
+  setCapacity(capacity: number): void {
+    if (capacity <= this.capacity) return;
+    const ring: Slot<T>[] = new Array(capacity);
+    for (let i = 0; i < capacity; i++) {
+      ring[i] = i < this.count
+        ? { ...this.slot(i) }
+        : { frame: null, timestamp: 0, arrivalTime: 0, decodeTime: 0, packetIndex: -1, packetSeq: -1 };
+    }
+    this.ring = ring;
+    this.capacity = capacity;
+    this.head = 0;
+  }
+
   /** Timestamp of the oldest queued frame, NaN when empty */
   get oldestTimestamp(): number {
     return this.count === 0 ? NaN : this.slot(0).timestamp;
