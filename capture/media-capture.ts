@@ -525,7 +525,8 @@ export class MediaCapture {
     const hdr: sesame.v1.wire.IFrameHeader = {
       type: isVideo ? sesame.v1.wire.FrameType.FRAME_TYPE_VIDEO : sesame.v1.wire.FrameType.FRAME_TYPE_AUDIO,
       media: {
-        pts: BigInt(event.timestamp),
+        // A number: the wire serializer writes a bigint pts as 0. Microsecond timestamps stay exact.
+        pts: event.timestamp,
         keyframe: event.keyframe,
         codecData: {
           codecType: isVideo ? this.videoCodec.type : this.audioCodec,
@@ -545,7 +546,7 @@ export class MediaCapture {
 
     // Apply audio timestamp offset
     if (!isVideo && this.config.audioTimestampOffset) {
-      hdr.media!.pts += BigInt(this.config.audioTimestampOffset);
+      hdr.media!.pts = event.timestamp + this.config.audioTimestampOffset;
     }
 
     if (this.config.topic) {

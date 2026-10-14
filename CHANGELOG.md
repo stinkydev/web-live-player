@@ -2,7 +2,71 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.2.0
+
+Live playback is rebuilt around a clock that audio and video share. See "Timing and A/V Sync"
+in the README.
+
+### Breaking
+
+- **`FrameScheduler` is gone.** The live player keeps to a `LiveClock` instead, buffering
+  decoded frames in a `VideoFrameQueue` with statistics in `PlaybackStats`.
+  `FrameScheduler`, `FrameTiming`, `SchedulerStatus`, `SchedulerConfig` and `DropReason` are
+  removed; `LatencyStats` and `PacketTimingEntry` are still exported.
+- **`LiveAudioPlayer` is rewritten.** `decode(payload, ptsUs)` takes the timestamp in
+  microseconds, and it now matters - the old player ignored it. `decodeFrame(frame)` takes a
+  parsed packet with its timestamp in the timebase of the codec data given to `init()`.
+  `resetTiming()` is removed. Pass `{ clock }` to play in sync with a video player.
+- **Audio waits for `play()`, and `pause()` mutes it.** The live player used to start audio as
+  soon as it arrived and keep it playing while paused.
+- **`bufferDelayMs` defaults to 150 and means a delay behind the earliest-arriving packets.**
+  Data later than that is dropped, so latency stays where it is set. `0` still shows each
+  frame as soon as it decodes; audio then plays 50 ms behind, out of sync.
+- **`getVideoFrame()` no longer uses its argument.** It picks the frame due when the frame will
+  be on screen, by default 1.5 render intervals after the call (`displayLatencyMs`), so render
+  loops on a timeline of their own (a fixed frame rate) get the right frame.
+
+### Fixed
+
+- **Audio and video play in sync.** They used to share nothing but the buffer delay setting:
+  audio played its chunks back to back as they arrived, its timestamps ignored, with latency
+  anywhere between nothing and the delay plus 100 ms, while video corrected its own clock with a
+  freeze or a skip every few seconds. Both now present what one clock says is due, the audio
+  heard (output latency included) checked against it every 20 ms. Measured with a flash and a
+  beep sharing a timestamp: within about 11 ms of each other at the screen and the speakers.
+- **Audio no longer drifts on 44.1 kHz devices.** Resampling each chunk on its own dropped a
+  sample at every boundary: 48 kHz Opus ran 68 ms a minute fast, AAC 51 ms. One continuous read
+  now converts the rate, and the audio device's own drift is learned and taken out.
+- **Playback starts at the buffer delay.** Video used to start on its first frame and reach the
+  delay about three seconds later, with a freeze.
+- **The backlog a subscription opens with is no longer shown.** A relay hands a new subscriber
+  the current group from its start, up to a GOP of old frames; video started that far behind
+  the live edge and caught up with a skip. It is now decoded but not shown.
+- **Streams published with `MediaCapture` carry their timestamps.** The pts was written as a
+  bigint, which the wire serializer writes as 0, so every packet went out stamped 0.
+- **Decoded audio keeps its timestamps across a gap.** Chrome's `AudioDecoder` stamps its output
+  by counting samples from the first chunk, so after packets were lost or skipped every chunk
+  came out early by the gap. The decoder restarts at a gap.
+
+### Added
+
+- `LiveClock` and the `clock` option of `LiveVideoPlayer` and `LiveAudioPlayer`: players of one
+  stream owned separately stay in sync by sharing one.
+- `audioDestination` and `displayLatencyMs` player options, `getClock()`, and `getStats().sync`
+  (`SyncStats`): the clock's state, the measured A/V offset, late frames and the audio player's
+  `LiveAudioStats`.
+- `LiveAudioPlayer`: `destination` and `trackKey` options, `getStats()`, `audiblePtsAt()`.
+- A/V sync test demo (`demo/sync`): publishes a flash-and-beep test pattern and measures lip
+  sync of it, or of any flash-and-beep stream, at the screen and the speakers.
+
+### Changed
+
+- The live player creates its `AudioContext` when audio first arrives, so a stream without audio
+  never makes one.
+- The audio worklet is TypeScript, bundled into the library as a string by
+  `vite-plugin-worklet.ts`. Its processor is registered as `live-audio-playout`.
+
+## 0.1.30
 
 ### Fixed
 

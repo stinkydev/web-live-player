@@ -92,7 +92,7 @@ import { createPlayer, createMoQSource } from '@stinkycomputing/web-live-player'
 // Create player
 const player = createPlayer({
   preferredDecoder: 'webcodecs-hw',
-  bufferDelayMs: 100,
+  bufferDelayMs: 150,
 });
 
 // Create MoQ source
@@ -263,9 +263,12 @@ Creates a live player instance.
 
 **Config options (`PlayerConfig`):**
 - `preferredDecoder`: `'webcodecs-hw' | 'webcodecs-sw' | 'wasm'` - Decoder preference (default: `'webcodecs-sw'`). The WASM decoder supports H.264 Baseline only.
-- `bufferDelayMs`: `number` - Target buffer delay in milliseconds (default: `100`). `0` enables bypass mode: always render the newest frame and drop the rest.
+- `bufferDelayMs`: `number` - How far playback runs behind the earliest-arriving packets, in milliseconds (default: `150`). Packets that arrive later than that are dropped rather than waited for, so latency never grows. `0` shows each frame as soon as it decodes, with audio 50 ms behind and not in sync. Ignored when `clock` is given. See [Timing and A/V Sync](#timing-and-av-sync).
+- `clock`: `LiveClock` - Clock to play on. Share one between the players of a stream (a video player and a separately owned `LiveAudioPlayer`, say) to keep them in sync.
+- `audioDestination`: `AudioNode` - Where the audio goes (default: the context's destination)
+- `displayLatencyMs`: `number` - How far ahead of the `getVideoFrame()` call frames are picked. By default 1.5 render intervals, measured from how often `getVideoFrame()` is called: a frame drawn now is on screen from the next refresh, for one refresh. Set it for a display pipeline with more latency, or `0` to pick for the moment of the call.
 - `enableAudio`: `boolean` - Enable audio playback (default: `true`)
-- `audioContext`: `AudioContext` - External context to use. When provided the player neither creates nor closes it; otherwise it owns one and closes it on `dispose()`.
+- `audioContext`: `AudioContext` - External context to use. When provided the player neither creates nor closes it; otherwise it creates one when audio first arrives (a stream without audio never gets one) and closes it on `dispose()`.
 - `videoTrackName`: `string | null` - Video track to accept (default: `'video'`, `null` accepts any)
 - `audioTrackName`: `string | null` - Audio track to accept (default: `'audio'`, `null` accepts any)
 - `debugLogging`: `boolean` - Enable debug logging (default: `false`)
@@ -275,10 +278,11 @@ Creates a live player instance.
 - `setTrackFilter(trackName: string)` - Accept video from this track, overriding `videoTrackName`
 - `connectToMoQSession(session: IStreamSource, videoTrackName?)` - Attach an existing MoQ session
 - `connectToMoQRelay(relayUrl, namespace, options?): Promise<IStreamSource>` - Build a MoQ source, connect it, and return it. `options`: `{ videoTrack?: string; audioTrack?: string | false }`. The player owns this source and disposes it - see [MoQ Session Injection](#moq-session-injection).
-- `play()` / `pause()` - Start and pause playback
-- `getVideoFrame(timestampMs: number): VideoFrame | null` - Frame for the current render timestamp. Player-owned; see [Best Practices](#best-practices).
-- `setBufferDelay(delayMs: number)` - Change the target buffer delay at runtime (applies to video and audio)
-- `getBufferDelay(): number` - Current target buffer delay
+- `play()` / `pause()` - Start and pause playback, audio included (audio is not heard before `play()`). The stream keeps arriving while paused, so `play()` resumes at the live edge.
+- `getVideoFrame(timestampMs?: number): VideoFrame | null` - The frame the clock says is due while it will be on screen. The argument is accepted for compatibility and not used, so render loops on a timeline of their own get the right frame. Player-owned; see [Best Practices](#best-practices).
+- `setBufferDelay(delayMs: number)` - Change the buffer delay at runtime. It is the clock's delay, so it applies to everything on the clock, audio included.
+- `getBufferDelay(): number` - Current buffer delay
+- `getClock(): LiveClock` - The clock the player plays on
 - `setPreferredDecoder(type: PreferredDecoder)` - Switch decoders at runtime. Rebuilds the decoder and requests a keyframe.
 - `flush()` - Drop the decoder and frame buffer, then request a keyframe. Used to recover from stalls.
 - `setVolume(volume: number)` / `getVolume(): number` - Audio volume, clamped to 0-1. Remembered across audio (re)initialization, so it can be set before audio arrives.
@@ -293,6 +297,52 @@ Creates a live player instance.
 - `metadata: (m: { width, height, codec }) => void` - Stream metadata resolved after decoder configuration
 - `statechange: (state: PlayerState) => void` - `'idle' | 'playing' | 'paused' | 'error'`
 - `error: (error: Error) => void` - Decoder or configuration failure
+
+### Timing and A/V Sync
+
+Every packet that arrives is reported to a `LiveClock`: the stream's playout timeline. The
+clock runs a fixed `bufferDelayMs` behind the earliest-arriving packets of the last few
+seconds, and every player on it presents what the clock says is due:
+
+- **Video** picks the newest decoded frame at or before the clock's time.
+- **Audio** is placed by its timestamps in a ring buffer in the audio worklet and read out at
+  the clock's position. The player compares the audio being heard (from the context's output
+  timestamp, so output latency, Bluetooth included, is accounted for) with the clock and
+  corrects the read speed by up to half a percent, or jumps with short fades when it is more
+  than 20 ms off. It also learns the audio device's drift against the system clock, and
+  converts the sample rate in the same read, so nothing drifts over time.
+
+Lateness is dropped, never waited for: a frame or audio chunk that arrives after its turn is
+discarded and the clock keeps its delay. The clock follows the publisher's clock drifting
+against the local one by running up to 1% fast or slow, jumps when it is far off (a buffer
+delay change, a much faster path), re-syncs within a second when every packet starts arriving
+late (a reconnect over a slower route), and starts over when the publisher restarts its
+timestamps. A subscription's opening backlog is decoded (the picture needs it) but not shown.
+
+Streams with only audio or only video play the same way. Players of one stream that are owned
+separately stay in sync by sharing a clock - here a video player and an audio player fed from
+the same source:
+
+```typescript
+import { LiveClock, LiveVideoPlayer, LiveAudioPlayer } from '@stinkycomputing/web-live-player';
+
+const clock = new LiveClock({ bufferDelayMs: 150 });
+const video = new LiveVideoPlayer({ clock, enableAudio: false });
+video.setStreamSource(source);
+video.play();
+
+const audio = new LiveAudioPlayer(audioContext, { clock, trackKey: 'audio:audio' });
+source.on('data', async (event) => {
+  if (event.streamType !== 'audio') return;
+  const codecData = event.data.header?.media?.codecData;
+  if (codecData && !configured) { configured = true; await audio.init(codecData); audio.start(); }
+  audio.decodeFrame(event.data);
+});
+```
+
+All tracks on one clock must share a timestamp timeline, as the audio and video of one stream
+do. `getStats().sync` reports how the clock and the audio are doing, and `avSyncMs`: the
+frame on screen against the audio being heard.
 
 ### `createFilePlayer(config?)` / `FileVideoPlayer`
 
@@ -337,15 +387,16 @@ Creates a file player instance for MP4 playback.
 
 | Field | Meaning |
 |-------|---------|
-| `bufferSize` | Frames currently buffered |
-| `bufferMs` / `avgBufferMs` | Current and averaged buffer depth in ms |
-| `targetBufferMs` | Configured buffer delay |
-| `droppedFrames` / `totalFrames` | Frames dropped and enqueued since start |
+| `bufferSize` | Decoded frames waiting |
+| `bufferMs` / `avgBufferMs` | How far ahead of the clock the decoded frames reach, now and averaged, in ms |
+| `targetBufferMs` | The clock's buffer delay |
+| `droppedFrames` / `totalFrames` | Frames dropped and decoded since start |
 | `decoderState` | Underlying decoder state, or `'none'` |
 | `streamWidth` / `streamHeight` | Coded dimensions from codec data |
 | `frameRate` | Estimated from packet timestamps (defaults to 30 until estimated) |
 | `latency` | `LatencyStats \| null` |
 | `bandwidth` | `BandwidthStats \| null` |
+| `sync` | `SyncStats` |
 
 `LatencyStats` holds `decodeLatency`, `bufferLatency`, `totalLatency` and their
 `avg*` counterparts, in milliseconds rounded to 0.1, averaged over roughly the last
@@ -353,6 +404,12 @@ second of frames.
 
 `BandwidthStats` holds `videoBytesPerSecond`, `audioBytesPerSecond` and
 `totalBytesPerSecond`, recomputed at most every 500ms when `getStats()` is called.
+
+`SyncStats` holds `clockRunning`, `clockRate` (1 = real time), `clockErrorMs` and
+`clockJumps`; `avSyncMs`, the middle of the frame on screen minus the audio being heard
+(about 0 when in sync, each reading within half a frame; null without audio); `lateFrames`,
+frames that finished decoding after their time; and `audio`, the audio player's
+`LiveAudioStats`.
 
 `PacketTimingEntry` (from `getPacketTimingHistory()`) holds `arrivalTime`,
 `intervalMs`, `streamTimestampUs`, `isKeyframe`, `decodeLatencyMs` and `wasDropped`.
@@ -486,10 +543,17 @@ with no repacking. Requires [bundler configuration](#wasm-decoder-tinyh264).
 
 Usually driven by the players, but usable directly.
 
-`LiveAudioPlayer(context, { bufferDelayMs })` (`LiveAudioConfig`) - `init(codecData)`,
-`decode(payload, timestampUs)`, `setBufferDelay(ms)`, `start()`, `stop()`,
-`clear()`, `resetTiming()`, `setVolume(0-1)`, `dispose()`. Decodes Opus and AAC and
-resamples to the context rate; PCM is not supported.
+`LiveAudioPlayer(context, config?)` plays a live track on a `LiveClock`. `LiveAudioConfig`:
+`clock` (to share with video players; without one it makes its own), `bufferDelayMs` (for a
+clock of its own, default 150), `destination` (default: the context's destination) and
+`trackKey` (the name its packets are reported under on the clock, default `'audio'`).
+
+Methods: `init(codecData)`; `decodeFrame(frame, arrivalMs?)`, which takes the timestamp in the
+timebase of the codec data given to `init()`, or `decode(payload, ptsUs, arrivalMs?)` with the
+timestamp in microseconds; `start()` and `stop()` to make it heard or mute it (it keeps to the
+clock either way); `clear()`; `setBufferDelay(ms)` (the clock's delay); `setVolume(0-1)`;
+`getClock()`; `audiblePtsAt(perfMs?)`; `getStats(): LiveAudioStats`; `dispose()`. Decodes Opus and
+AAC; PCM is not supported.
 
 `FileAudioPlayer(context, { sampleRate?, channels? })` -
 `init(codec, sampleRate, channels, description?)`,
@@ -512,35 +576,35 @@ class MyPlayer extends BasePlayer<MyState> {
 }
 ```
 
-### `FrameScheduler<T>`
+### `LiveClock`
 
-The buffering and drift-correction engine, generic over the frame type.
+The playout timeline the players keep to (see [Timing and A/V Sync](#timing-and-av-sync)).
 
 ```typescript
-const scheduler = new FrameScheduler<VideoFrame>({   // SchedulerConfig<VideoFrame>
-  bufferDelayMs: 100,            // 0 = bypass mode, always newest frame
-  maxBufferSize,                 // default: max(30, 2x buffer delay at 60fps)
-  driftCheckInterval: 150,       // dequeues between drift checks
-  driftCorrectionThresholdMs: 30,
-  logger: (msg) => {},
-  onFrameDropped: (frame, reason) => frame.close(),   // DropReason
+const clock = new LiveClock({    // LiveClockConfig
+  bufferDelayMs: 150,            // behind the earliest-arriving packets
+  maxRateAdjust: 0.01,           // largest speed change used to correct it
+  logger: (msg) => {},           // jumps and discontinuities
 });
 
-scheduler.enqueueFrame(frame, timestampUs, arrivalTime, decodeTime, isKeyframe);
-const frame = scheduler.dequeue(performance.now());
+clock.onPacket('video:video', ptsUs, performance.now());   // every packet, as it arrives
+const due = clock.ptsAt(performance.now());                 // µs, or null before it starts
 ```
 
-`enqueue(frame, timestampUs, timing, isKeyframe?)` takes a `FrameTiming` object
-instead; `enqueueFrame` is the allocation-free variant. Also exposes
-`getStatus(): SchedulerStatus`, `getLatencyStats()`, `getPacketTimingHistory()`,
-`setBufferDelay()`, `getBufferDelay()`, `clear()`, `resetStats()` and `logStatus()`.
+Also `targetAt(timeMs)` (where the clock is heading, available from the first packet),
+`setBufferDelay(ms)` (applied at once), `getBufferDelay()`, `reset()`, `isRunning`, `rate` and
+`getStats(): LiveClockStats`. Each track reports under a key of its own; the key is how a
+timestamp discontinuity on one track is told apart from the others.
 
-**You must close dropped frames** in `onFrameDropped` - the scheduler never closes
-them itself. `clear()` reports every buffered frame through the same callback. The
-reason is `'overflow'` (buffer full), `'skip'` (playback fell behind) or
-`'discontinuity'` (the stream timestamps stepped backwards or jumped ahead by more
-than a second, as when the publisher restarts: the buffer and sync point are
-dropped so playback re-syncs to the new timeline).
+### `VideoFrameQueue<T>` / `PlaybackStats`
+
+What the live player buffers decoded frames and keeps statistics with.
+`new VideoFrameQueue<T>({ capacity, onDrop })` holds frames in timestamp order:
+`push(frame, timestampUs, arrivalTime, decodeTime, dueUs)` (frames already due are let go but
+the newest), `take(dueUs)` (the newest frame due, dropping older ones), `takeNewest()` and
+`clear()`. **You must close dropped frames** in `onDrop`, which gets a `FrameDropReason`:
+`'late'`, `'skip'`, `'overflow'`, `'discontinuity'` or `'clear'`. `PlaybackStats` records
+the latency of shown frames and the packet timing history.
 
 ## Capture and Publishing
 
@@ -814,7 +878,7 @@ If you need raw YUV data for custom processing, you can access the `WasmDecoder`
 
 1. **Don't close frames from `getVideoFrame()`** - the player owns them and closes each one when the next is due. They are valid until the following call; `clone()` if you need to keep one, and close the clone yourself. The same applies to frames delivered by the `'frame'` event, which are only valid for the duration of the handler.
 2. **Check for null frames** - `getVideoFrame()` returns null when no frame is ready
-3. **Use performance.now()** - Pass accurate timestamps for proper frame scheduling
+3. **Call `getVideoFrame()` once per rendered frame** - the player measures your render interval from the calls to pick each frame for when it will be on screen
 4. **Handle resize** - Update canvas dimensions when video dimensions change
 5. **Call `dispose()`** - Decoders, workers, audio contexts and buffered frames are not released by garbage collection alone
 
@@ -879,7 +943,7 @@ out of the initial chunk for apps that never use it.
 
 ## Demos
 
-The library includes three demo applications showcasing different use cases:
+The library includes four demo applications showcasing different use cases:
 
 ### [Player Demo](demo/player/)
 Live stream and file playback with multiple decoder options.
@@ -899,6 +963,12 @@ Multi-user video chat combining capture and playback.
 - Room-based user discovery
 - Text chat over data tracks
 
+### [A/V Sync Test](demo/sync/)
+Measures lip sync end to end.
+- Publishes a test pattern: a flash and a beep with the same timestamp, once a second
+- Plays it (or any flash-and-beep stream) back and times each flash on screen against its beep at the audio output
+- Both player setups: a `LiveVideoPlayer` with its own audio, or separate players on a shared `LiveClock`
+
 ### Running the Demos
 
 ```bash
@@ -913,6 +983,7 @@ Open http://localhost:3001 to see all demos.
 | Player | http://localhost:3001/player/ | Stream playback & file player |
 | Capture | http://localhost:3001/capture/ | Camera capture & streaming |
 | Chat | http://localhost:3001/chat/ | Multi-user video chat |
+| A/V Sync Test | http://localhost:3001/sync/ | Lip sync measurement |
 
 ## Building
 

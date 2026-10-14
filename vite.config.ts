@@ -1,9 +1,12 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
+import { workletSource } from './vite-plugin-worklet';
 
 export default defineConfig({
   root: resolve(__dirname, 'demo'),
   base: './',
+
+  plugins: [workletSource()],
   
   // Handle tinyh264's .asset files as URLs
   assetsInclude: ['**/*.asset'],
@@ -37,6 +40,7 @@ export default defineConfig({
         player: resolve(__dirname, 'demo/player/index.html'),
         capture: resolve(__dirname, 'demo/capture/index.html'),
         chat: resolve(__dirname, 'demo/chat/index.html'),
+        sync: resolve(__dirname, 'demo/sync/index.html'),
       },
     },
   },

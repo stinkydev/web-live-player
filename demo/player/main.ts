@@ -23,6 +23,7 @@ const logContainer = document.getElementById('logContainer')!;
 // Stats elements
 const statBuffer = document.getElementById('statBuffer')!;
 const statLatency = document.getElementById('statLatency')!;
+const statSync = document.getElementById('statSync')!;
 const statResolution = document.getElementById('statResolution')!;
 const statFrameRate = document.getElementById('statFrameRate')!;
 const statDropped = document.getElementById('statDropped')!;
@@ -155,6 +156,12 @@ function updateStats() {
     statLatency.textContent = '-';
   }
   
+  // Frame on screen against the audio heard; the clock's speed shows it following the publisher
+  const sync = stats.sync;
+  statSync.textContent = sync.clockRunning
+    ? `${sync.avSyncMs !== null ? `${sync.avSyncMs}ms` : 'no audio'} (${sync.clockRate.toFixed(3)}x)`
+    : '-';
+
   // Display bandwidth
   if (stats.bandwidth) {
     statVideoBandwidth.textContent = formatBandwidth(stats.bandwidth.videoBytesPerSecond);
