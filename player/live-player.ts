@@ -267,6 +267,8 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   // Decode latency of on-time packets, for the least delay the picture needs
   private decodeLatencies = new Float64Array(DECODE_WINDOW);
   private decodeLatencyCount = 0;
+  // Frames out of the decoder since it was (re)started: until then a backlog is it starting up
+  private framesSinceDecoderStart = 0;
   private decodeLatencyWrite = 0;
   private decodeSorted = new Float64Array(DECODE_WINDOW);
   private videoMinimumDelayMs = 0;
@@ -912,7 +914,22 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       // Use rescaled PTS (microseconds) as key to match what decoder outputs
       const arrivalTime = performance.now();
       const timestampUs = rescaleTime(data.header.media?.pts ?? 0, this.currentTimebase, MICROSECOND_TIMEBASE);
-      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, this.packetLatenessMs);
+
+      // A decoder that has fallen behind - stopped while the tab was hidden, say - only keeps
+      // pace afterwards, so its backlog would stay for good. Once it holds more than the buffer
+      // delay's worth of frames, those are late anyway: restart it from this keyframe.
+      const queued = this.decoder.decodeQueueSize;
+      const backlogLimit = this.decodeBacklogLimit();
+      if (isKeyframe && this.framesSinceDecoderStart > 0 && queued > backlogLimit) {
+        this.logger.warn(`Decoder ${queued} frames behind, restarting from a keyframe`);
+        this.decoder.reset();
+        this.framesSinceDecoderStart = 0;
+      }
+      // A frame waiting behind a backlog, or in a hidden tab, says nothing about how long
+      // decoding takes: keep it out of the latency the picture is given (as a replayed one)
+      const behind = (!isKeyframe && queued > backlogLimit) ||
+        (typeof document !== 'undefined' && document.visibilityState === 'hidden');
+      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, behind ? NaN : this.packetLatenessMs);
 
       // Estimate FPS from timestamp difference between consecutive frames
       if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
@@ -956,6 +973,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
 
     this.waitingForKeyframe = true;
+    this.framesSinceDecoderStart = 0;
 
     // Replay what arrived while configuring, from the newest keyframe: anything older
     // would only be decoded to be dropped. Frames older than the clock are decoded (the
@@ -982,6 +1000,11 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     if (this.timingCount < LiveVideoPlayer.TIMING_RING_SIZE) {
       this.timingCount++;
     }
+  }
+
+  /** Frames the decoder may hold before it counts as behind: the buffer delay's worth (at least 250 ms) */
+  private decodeBacklogLimit(): number {
+    return Math.max(4, Math.ceil((Math.max(this.clock.getBufferDelay(), 250) / 1000) * this.estimatedFrameRate));
   }
 
   /** Find a recorded packet by stream timestamp, newest first. Returns -1 if unknown. */
@@ -1223,7 +1246,9 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     const arrivalTime = i >= 0 ? this.timingArrivals[i] : decodeTime;
     const isKeyframe = i >= 0 ? this.timingKeyframes[i] === 1 : false;
     this.playbackStats.recordPacket(arrivalTime, timestampUs, isKeyframe, decodeTime, i >= 0 ? this.timingLateness[i] : NaN);
-    if (i >= 0 && this.timingLateness[i] <= ON_TIME_MS) {
+    this.framesSinceDecoderStart++;
+    const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    if (i >= 0 && this.timingLateness[i] <= ON_TIME_MS && !hidden) {
       this.recordDecodeLatency(decodeTime - arrivalTime);
     }
 

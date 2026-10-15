@@ -2,7 +2,18 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.2.2
+
+### Fixed
+
+- **Switching away from the tab no longer leaves the video seconds behind for good.** Chrome
+  stops the video decoder in a hidden tab while packets keep arriving. Back in view, the
+  decoder only kept pace with its backlog, and the backlog's decode latency raised the delay
+  the picture was given, so it never caught up. A decoder holding more than the buffer delay's
+  worth of frames (at least 250 ms) now restarts from the next keyframe, and frames decoded
+  behind a backlog or in a hidden tab no longer count towards the video's minimum delay.
+
+## 0.2.1
 
 ### Fixed
 
