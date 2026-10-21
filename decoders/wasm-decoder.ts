@@ -34,6 +34,9 @@ export class WasmDecoder implements IVideoDecoder {
   /** Access units submitted, used to discard pictures decoded before a flush */
   private seq: number = 0;
   private flushSeq: number = 0;
+  // Timestamps of the pictures in flight, in decode order (Broadway outputs in that order)
+  private queuedTimestamps: Float64Array;
+  private queuedHead: number = 0;
 
   private onFrameDecoded?: (frame: YUVFrame) => void;
   private onError?: (error: Error) => void;
@@ -47,10 +50,27 @@ export class WasmDecoder implements IVideoDecoder {
     this.onError = config.onError;
     this.onQueueOverflow = config.onQueueOverflow;
     this.maxQueueSize = config.maxQueueSize ?? 10;
+    // Back-pressure lets the queue reach one over the limit
+    this.queuedTimestamps = new Float64Array(this.maxQueueSize + 2);
   }
-  
+
   get queueSize(): number {
     return this._queueSize;
+  }
+
+  /** Timestamp of the oldest picture still being decoded, µs; NaN when none is */
+  get oldestQueuedTimestamp(): number {
+    return this._queueSize > 0 ? this.queuedTimestamps[this.queuedHead] : NaN;
+  }
+
+  /**
+   * Let go of the pictures still being decoded - they are discarded as they come out. The next
+   * access unit given must be a keyframe. Returns how many.
+   */
+  discardQueued(): number {
+    const count = this._queueSize;
+    this.flush();
+    return count;
   }
   
   /**
@@ -151,6 +171,8 @@ export class WasmDecoder implements IVideoDecoder {
 
     // Only slices produce a picture; counting parameter sets would stall the queue
     if (expectsPicture) {
+      const size = this.queuedTimestamps.length;
+      this.queuedTimestamps[(this.queuedHead + this._queueSize) % size] = pts;
       this._queueSize++;
     }
   }
@@ -189,6 +211,7 @@ export class WasmDecoder implements IVideoDecoder {
 
     if (this._queueSize > 0) {
       this._queueSize--;
+      this.queuedHead = (this.queuedHead + 1) % this.queuedTimestamps.length;
     }
 
     const { width, height, data } = message;

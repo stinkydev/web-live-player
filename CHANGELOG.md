@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **A decoder that falls behind catches up without stalling every keyframe.** 0.2.2 restarted a
+  decoder holding more than the delay's worth of frames at the next keyframe. A hardware decoder
+  takes about half a second to start up again, and the frames arriving meanwhile left it behind
+  once more, so the picture held for half a second at every keyframe until the page was
+  reloaded. The live player now gives the decoder four chunks at a time and keeps the rest
+  itself (`maxInDecoder` on `WebCodecsDecoder`). A backlog longer than the delay is let go at
+  the next keyframe without restarting the decoder, and a keyframe is asked of the source to
+  shorten the wait. A full queue at a keyframe no longer restarts the decoder either.
+
 ## 0.2.2
 
 ### Fixed

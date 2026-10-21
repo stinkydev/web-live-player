@@ -61,6 +61,13 @@ export interface IVideoDecoder {
    */
   /** Chunks submitted and not yet taken by the decoder. */
   readonly decodeQueueSize: number;
+  /** Timestamp of the oldest chunk that can still be let go, µs; NaN when there is none */
+  readonly oldestQueuedTimestamp?: number;
+  /**
+   * Let go of the queued chunks without restarting the decoder; the next chunk given must be a
+   * keyframe. Returns how many.
+   */
+  discardQueued?(): number;
   flush(): void;
   
   /**
