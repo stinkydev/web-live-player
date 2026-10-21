@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { WebCodecsDecoder } from './webcodecs-decoder';
 
 // A VideoDecoder whose queue length the test controls.
@@ -28,7 +28,7 @@ const frame = (keyframe: boolean, pts = 40) => ({
 const quiet = { info() {}, warn() {}, error() {}, debug() {} } as any;
 
 describe('WebCodecsDecoder back-pressure', () => {
-  let overflow: ReturnType<typeof vi.fn>;
+  let overflow: Mock<(queueSize: number) => void>;
   let decoder: WebCodecsDecoder;
   let inner: FakeVideoDecoder;
 
@@ -80,7 +80,7 @@ describe('WebCodecsDecoder back-pressure', () => {
 });
 
 describe('WebCodecsDecoder with chunks waiting their turn', () => {
-  let overflow: ReturnType<typeof vi.fn>;
+  let overflow: Mock<(queueSize: number) => void>;
   let decoder: WebCodecsDecoder;
   let inner: FakeVideoDecoder;
   /** The decoder takes the oldest chunk it holds */

@@ -5,12 +5,12 @@
  * range support and uses progressive or full loading accordingly.
  */
 
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach, type Mock } from 'vitest';
 import { MP4FileSource, editListOffsetUs, presentationDurationS } from './mp4-file-source';
 
 describe('MP4FileSource', () => {
   let source: MP4FileSource;
-  let onProgressMock: ReturnType<typeof vi.fn>;
+  let onProgressMock: Mock<(loaded: number, total: number) => void>;
   
   beforeEach(() => {
     onProgressMock = vi.fn();

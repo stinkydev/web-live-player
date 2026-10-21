@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config';
-import { workletSource } from './vite-plugin-worklet';
+import { workletSource } from './vite-plugin-worklet.ts';
 
 export default defineConfig({
   plugins: [workletSource()],
