@@ -326,6 +326,9 @@ against the local one by running up to 1% fast or slow, jumps when it is far off
 delay change, a much faster path), re-syncs within a second when every packet starts arriving
 late (a reconnect over a slower route), and starts over when the publisher restarts its
 timestamps. A subscription's opening backlog is decoded (the picture needs it) but not shown.
+The decoder is given a few chunks at a time, the rest waiting in the player; when it falls
+behind by more than the delay (Chrome stops it in a hidden tab), the waiting chunks are let go
+at the next keyframe and decoding carries on from it, with a keyframe asked of the source.
 
 Streams with only audio or only video play the same way. Players of one stream that are owned
 separately stay in sync by sharing a clock - here a video player and an audio player fed from

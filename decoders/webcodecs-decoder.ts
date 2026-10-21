@@ -17,6 +17,11 @@ export interface DecoderConfig {
   onError?: (error: Error) => void;
   onQueueOverflow?: (queueSize: number) => void;
   maxQueueSize?: number;
+  /**
+   * Chunks the VideoDecoder is given at a time (default: no limit). The rest wait here, in
+   * order, where discardQueued() can let them go without restarting the decoder.
+   */
+  maxInDecoder?: number;
 }
 
 /**
@@ -38,6 +43,10 @@ export class WebCodecsDecoder implements IVideoDecoder {
   private flushing = false;
   private logger: Logger;
   private maxQueueSize: number;
+  private maxInDecoder: number;
+  // Chunks given and not yet passed to the VideoDecoder, oldest first from waitingHead
+  private waiting: (EncodedVideoChunk | undefined)[] = [];
+  private waitingHead = 0;
   
   public onFrameDecoded?: (frame: VideoFrame) => void;
   public onError?: (error: Error) => void;
@@ -56,11 +65,33 @@ export class WebCodecsDecoder implements IVideoDecoder {
     this.onError = options.onError;
     this.onQueueOverflow = options.onQueueOverflow;
     this.maxQueueSize = options.maxQueueSize ?? 10;
+    this.maxInDecoder = Math.max(1, options.maxInDecoder ?? Infinity);
     this.createDecoder();
   }
   
+  /** Chunks given and not yet taken by the decoder, those waiting to be passed to it included */
   get decodeQueueSize(): number {
-    return this.decoder?.decodeQueueSize ?? 0;
+    return (this.decoder?.decodeQueueSize ?? 0) + this.waitingCount;
+  }
+
+  /** Timestamp of the oldest chunk waiting to be passed to the decoder, µs; NaN when none waits */
+  get oldestQueuedTimestamp(): number {
+    return this.waitingHead < this.waiting.length ? this.waiting[this.waitingHead]!.timestamp : NaN;
+  }
+
+  private get waitingCount(): number {
+    return this.waiting.length - this.waitingHead;
+  }
+
+  /**
+   * Let go of the chunks waiting to be passed to the decoder, without restarting it: the few it
+   * already holds still come out. The next chunk given must be a keyframe. Returns how many.
+   */
+  discardQueued(): number {
+    const count = this.waitingCount;
+    this.waiting.length = 0;
+    this.waitingHead = 0;
+    return count;
   }
   
   get state(): string {
@@ -78,6 +109,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
           // No handler - must close frame to prevent memory leak
           frame.close();
         }
+        this.feed();
       },
       error: (e) => {
         this.logger.error(`Decoder error: ${e.message}`);
@@ -86,8 +118,44 @@ export class WebCodecsDecoder implements IVideoDecoder {
         }
       }
     });
+    // Passed on as the decoder takes chunks (on output too, for browsers without the event)
+    this.decoder.ondequeue = () => this.feed();
   }
-  
+
+  /** Pass waiting chunks to the decoder while it holds fewer than maxInDecoder */
+  private feed(): void {
+    const decoder = this.decoder;
+    while (this.waitingHead < this.waiting.length && decoder && decoder.state === 'configured' &&
+      decoder.decodeQueueSize < this.maxInDecoder) {
+      const chunk = this.waiting[this.waitingHead]!;
+      this.waiting[this.waitingHead++] = undefined;
+      this.submit(chunk);
+    }
+    if (this.waitingHead === this.waiting.length) {
+      this.waiting.length = 0;
+      this.waitingHead = 0;
+    }
+  }
+
+  /** Give a chunk to the decoder, or have it wait its turn */
+  private enqueue(chunk: EncodedVideoChunk): void {
+    if (this.waitingCount === 0 && (this.decoder?.decodeQueueSize ?? 0) < this.maxInDecoder) {
+      this.submit(chunk);
+      return;
+    }
+    this.waiting.push(chunk);
+    this.feed();
+  }
+
+  private submit(chunk: EncodedVideoChunk): void {
+    try {
+      this.chunksSentToDecoder++;
+      this.decoder?.decode(chunk);
+    } catch (e) {
+      this.logger.error(`Decode error: ${e}`);
+    }
+  }
+
   /**
    * Configure the decoder for a specific codec (from IMediaCodecData)
    */
@@ -210,13 +278,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       type: data.header.media?.keyframe ? 'key' : 'delta',
       data: data.payload ?? new Uint8Array(0),
     });
-    
-    try {
-      this.chunksSentToDecoder++;
-      this.decoder.decode(chunk);
-    } catch (e) {
-      this.logger.error(`Decode error: ${e}`);
-    }
+    this.enqueue(chunk);
   }
   
   /**
@@ -242,13 +304,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
       type: sample.isKeyframe ? 'key' : 'delta',
       data: sample.data,
     });
-    
-    try {
-      this.chunksSentToDecoder++;
-      this.decoder.decode(chunk);
-    } catch (e) {
-      this.logger.error(`Decode error: ${e}`);
-    }
+    this.enqueue(chunk);
   }
   
   /**
@@ -256,11 +312,12 @@ export class WebCodecsDecoder implements IVideoDecoder {
    * is not being drained (a busy main thread delays the output callbacks). A delta frame
    * that finds the queue full is dropped and reported, so the player waits for the next
    * keyframe; the queued frames still decode and show. A keyframe that finds the queue
-   * full restarts the decoder on the spot: the backlog is thrown away and playback
-   * resumes from this frame instead of a group later.
+   * full throws the backlog away and playback resumes from this frame instead of a group
+   * later: the chunks waiting their turn are let go, or - when the decoder holds them all -
+   * the decoder restarts on the spot.
    */
   private admit(isKeyframe: boolean): boolean {
-    if (!this.decoder || this.decoder.decodeQueueSize <= this.maxQueueSize) {
+    if (!this.decoder || this.decodeQueueSize <= this.maxQueueSize) {
       return true;
     }
     // still initialising: the queue drains once it starts, and a restart would only
@@ -269,10 +326,15 @@ export class WebCodecsDecoder implements IVideoDecoder {
       return true;
     }
     if (!isKeyframe) {
-      this.onQueueOverflow?.(this.decoder.decodeQueueSize);
+      this.onQueueOverflow?.(this.decodeQueueSize);
       return false;
     }
-    this.logger.warn(`Decoder queue full (${this.decoder.decodeQueueSize} frames) at a keyframe, restarting from it`);
+    if (this.waitingCount > 0) {
+      this.logger.warn(`Decoder queue full (${this.decodeQueueSize} frames) at a keyframe, carrying on from it`);
+      this.discardQueued();
+      return true;
+    }
+    this.logger.warn(`Decoder queue full (${this.decodeQueueSize} frames) at a keyframe, restarting from it`);
     this.reset();
     return this.decoder.state === 'configured';
   }
@@ -286,7 +348,11 @@ export class WebCodecsDecoder implements IVideoDecoder {
     }
     
     this.flushing = true;
-    
+
+    // Everything given is decoded, the chunks still waiting too
+    for (let i = this.waitingHead; i < this.waiting.length; i++) this.submit(this.waiting[i]!);
+    this.discardQueued();
+
     try {
       await this.decoder.flush();
     } catch (e) {
@@ -301,6 +367,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
    */
   flushSync(): void {
     this.flushing = true;
+    this.discardQueued();
     if (this.decoder && this.decoder.state !== 'closed') {
       this.decoder.reset();
       
@@ -316,6 +383,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
    * Reset the decoder
    */
   reset(): void {
+    this.discardQueued();
     if (this.decoder && this.decoder.state !== 'closed') {
       this.decoder.reset();
       
@@ -330,6 +398,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
    * Dispose the decoder
    */
   dispose(): void {
+    this.discardQueued();
     if (this.decoder) {
       if (this.decoder.state !== 'closed') {
         this.decoder.close();

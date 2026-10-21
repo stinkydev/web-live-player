@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { framesFromLastKeyframe, LiveVideoPlayer } from './live-player';
 import { LiveClock } from '../sync/live-clock';
+import { WebCodecsDecoder } from '../decoders/webcodecs-decoder';
 
 const f = (keyframe: boolean, pts: number) => ({ valid: true, header: { media: { keyframe, pts } }, payload: new Uint8Array(1) } as any);
 
@@ -100,5 +101,123 @@ describe('LiveVideoPlayer playout', () => {
     player.pause();
     p.handleDecodedFrame(decoded(PTS0 + (now - 120) * 1000));
     expect(player.getVideoFrame()).toBe(shown);
+  });
+});
+
+describe('LiveVideoPlayer with a decoder that falls behind', () => {
+  /**
+   * A VideoDecoder that decodes one chunk per step(), in order - no faster than a stream it
+   * keeps pace with - and has to start up again after a reset
+   */
+  class PacedDecoder {
+    static last: PacedDecoder;
+    state = 'unconfigured';
+    held: { timestamp: number }[] = [];
+    ondequeue: (() => void) | null = null;
+    constructor(public init: any) { PacedDecoder.last = this; }
+    get decodeQueueSize() { return this.held.length; }
+    configure = vi.fn(() => { this.state = 'configured'; });
+    decode(chunk: { timestamp: number }) { this.held.push(chunk); }
+    reset = vi.fn(() => { this.held = []; this.state = 'unconfigured'; });
+    close() { this.state = 'closed'; }
+    async flush() {}
+    step() {
+      const chunk = this.held.shift();
+      if (!chunk) return;
+      this.ondequeue?.();
+      this.init.output({ timestamp: chunk.timestamp, close() {} });
+    }
+  }
+  class Chunk {
+    timestamp: number;
+    type: string;
+    constructor(init: any) { this.timestamp = init.timestamp; this.type = init.type; }
+  }
+
+  // 50 fps, a keyframe every 2 s
+  const FRAME_MS = 20;
+  const GOP = 100;
+  const packet = (n: number) => ({
+    valid: true,
+    header: { media: { pts: n * FRAME_MS * 1000, keyframe: n % GOP === 0 } },
+    payload: new Uint8Array(1),
+  } as any);
+
+  let player: LiveVideoPlayer;
+  let p: any;
+  let inner: PacedDecoder;
+  let skips: number;
+  let requestKeyframe: ReturnType<typeof vi.fn>;
+  let lastOut: number;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['performance'] });
+    vi.stubGlobal('VideoDecoder', PacedDecoder);
+    vi.stubGlobal('EncodedVideoChunk', Chunk);
+    player = new LiveVideoPlayer({ enableAudio: false, clock: new LiveClock({ bufferDelayMs: 100 }), displayLatencyMs: 0 });
+    p = player as any;
+    p.decoder = new WebCodecsDecoder({
+      logger: { info() {}, warn() {}, error() {}, debug() {} } as any,
+      onFrameDecoded: (frame) => { lastOut = frame.timestamp; p.handleDecodedFrame(frame); },
+      maxQueueSize: 512,
+      maxInDecoder: 4,
+    });
+    inner = PacedDecoder.last;
+    p.decoder.config = { codec: 'av01.0.08M.08' };
+    inner.configure();
+    p.decoder.outputSinceConfigure = true;
+    requestKeyframe = vi.fn();
+    p.streamSource = { requestKeyframe };
+    skips = 0;
+    vi.spyOn(p.logger, 'warn').mockImplementation((msg: unknown) => { if (String(msg).includes('skipping')) skips++; });
+    lastOut = NaN;
+  });
+
+  afterEach(() => {
+    player.dispose();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  /** Packets `from` to `to` arrive one a frame apart, the decoder taking one each time unless stalled */
+  function play(from: number, to: number, stalled = (_n: number) => false) {
+    for (let n = from; n <= to; n++) {
+      vi.advanceTimersByTime(FRAME_MS);
+      p.decodeVideoFrame(packet(n));
+      if (!stalled(n)) inner.step();
+    }
+  }
+
+  it('skips a stall\'s backlog at the next keyframe once, without restarting the decoder', () => {
+    // stopped for 0.8 s (a hidden tab), then only keeping pace: 40 frames behind for good
+    play(0, 99, (n) => n >= 50 && n < 90);
+    expect(skips).toBe(0);
+    expect(requestKeyframe).toHaveBeenCalledOnce();
+
+    play(100, 1000);
+    expect(skips).toBe(1);
+    expect(inner.reset).not.toHaveBeenCalled();
+    // back to the few chunks the decoder holds
+    expect(1000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual(5 * FRAME_MS * 1000);
+    expect(requestKeyframe).toHaveBeenCalledOnce();
+  });
+
+  it('skips the rest of a subscription\'s opening group at the next keyframe', () => {
+    // the relay hands over the group so far, 1.2 s of it, at once
+    for (let n = 0; n < 60; n++) p.decodeVideoFrame(packet(n));
+    play(60, 99);
+    expect(skips).toBe(0);
+
+    play(100, 400);
+    expect(skips).toBe(1);
+    expect(inner.reset).not.toHaveBeenCalled();
+    expect(400 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual(5 * FRAME_MS * 1000);
+  });
+
+  it('leaves a decoder that keeps up alone', () => {
+    play(0, 1000);
+    expect(skips).toBe(0);
+    expect(requestKeyframe).not.toHaveBeenCalled();
+    expect(1000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual(FRAME_MS * 1000);
   });
 });

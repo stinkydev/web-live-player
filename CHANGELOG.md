@@ -6,6 +6,30 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **A decoder that falls behind catches up without stalling every keyframe.** 0.2.2 restarted a
+  decoder holding more than the delay's worth of frames at the next keyframe. A hardware decoder
+  takes about half a second to start up again, and the frames arriving meanwhile left it behind
+  once more, so the picture held for half a second at every keyframe until the page was
+  reloaded. The live player now gives the decoder four chunks at a time and keeps the rest
+  itself (`maxInDecoder` on `WebCodecsDecoder`). A backlog longer than the delay is let go at
+  the next keyframe without restarting the decoder, and a keyframe is asked of the source to
+  shorten the wait. A full queue at a keyframe no longer restarts the decoder either.
+
+## 0.2.2
+
+### Fixed
+
+- **Switching away from the tab no longer leaves the video seconds behind for good.** Chrome
+  stops the video decoder in a hidden tab while packets keep arriving. Back in view, the
+  decoder only kept pace with its backlog, and the backlog's decode latency raised the delay
+  the picture was given, so it never caught up. A decoder holding more than the buffer delay's
+  worth of frames (at least 250 ms) now restarts from the next keyframe, and frames decoded
+  behind a backlog or in a hidden tab no longer count towards the video's minimum delay.
+
+## 0.2.1
+
+### Fixed
+
 - **Audio steps exactly on wall-clock timelines.** Streams from `MediaCapture` are stamped on the
   wall clock, which puts the worklet's read position near 1e14 samples - where a double cannot
   hold the fraction of a resampling step. On a 44.1 kHz device audio ran 0.5% fast and the

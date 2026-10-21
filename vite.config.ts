@@ -1,9 +1,9 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
-import { workletSource } from './vite-plugin-worklet';
+import { workletSource } from './vite-plugin-worklet.ts';
 
 export default defineConfig({
-  root: resolve(__dirname, 'demo'),
+  root: resolve(import.meta.dirname, 'demo'),
   base: './',
 
   plugins: [workletSource()],
@@ -13,7 +13,7 @@ export default defineConfig({
   
   resolve: {
     alias: {
-      '@': resolve(__dirname, '.'),
+      '@': resolve(import.meta.dirname, '.'),
     },
   },
   
@@ -32,15 +32,15 @@ export default defineConfig({
   },
   
   build: {
-    outDir: resolve(__dirname, 'dist-demo'),
+    outDir: resolve(import.meta.dirname, 'dist-demo'),
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        main: resolve(__dirname, 'demo/index.html'),
-        player: resolve(__dirname, 'demo/player/index.html'),
-        capture: resolve(__dirname, 'demo/capture/index.html'),
-        chat: resolve(__dirname, 'demo/chat/index.html'),
-        sync: resolve(__dirname, 'demo/sync/index.html'),
+        main: resolve(import.meta.dirname, 'demo/index.html'),
+        player: resolve(import.meta.dirname, 'demo/player/index.html'),
+        capture: resolve(import.meta.dirname, 'demo/capture/index.html'),
+        chat: resolve(import.meta.dirname, 'demo/chat/index.html'),
+        sync: resolve(import.meta.dirname, 'demo/sync/index.html'),
       },
     },
   },

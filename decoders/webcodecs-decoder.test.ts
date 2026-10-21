@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { WebCodecsDecoder } from './webcodecs-decoder';
 
 // A VideoDecoder whose queue length the test controls.
@@ -13,16 +13,22 @@ class FakeVideoDecoder {
   close = vi.fn(() => { this.state = 'closed'; });
   constructor(public init: any) { FakeVideoDecoder.instances.push(this); }
 }
-class FakeChunk { constructor(public init: any) {} }
+class FakeChunk {
+  timestamp: number;
+  type: string;
+  constructor(public init: any) { this.timestamp = init.timestamp; this.type = init.type; }
+}
 
-const frame = (keyframe: boolean) => ({
+const frame = (keyframe: boolean, pts = 40) => ({
   valid: true,
-  header: { type: 1, media: { pts: 40, keyframe, codecData: { timebaseNum: 1, timebaseDen: 50 } } },
+  header: { type: 1, media: { pts, keyframe, codecData: { timebaseNum: 1, timebaseDen: 50 } } },
   payload: new Uint8Array([1, 2, 3]),
 } as any);
 
+const quiet = { info() {}, warn() {}, error() {}, debug() {} } as any;
+
 describe('WebCodecsDecoder back-pressure', () => {
-  let overflow: ReturnType<typeof vi.fn>;
+  let overflow: Mock<(queueSize: number) => void>;
   let decoder: WebCodecsDecoder;
   let inner: FakeVideoDecoder;
 
@@ -70,5 +76,78 @@ describe('WebCodecsDecoder back-pressure', () => {
     expect(inner.decode).toHaveBeenCalledOnce();
     expect((inner.decode.mock.calls[0][0] as FakeChunk).init.type).toBe('key');
     expect(overflow).not.toHaveBeenCalled();
+  });
+});
+
+describe('WebCodecsDecoder with chunks waiting their turn', () => {
+  let overflow: Mock<(queueSize: number) => void>;
+  let decoder: WebCodecsDecoder;
+  let inner: FakeVideoDecoder;
+  /** The decoder takes the oldest chunk it holds */
+  const take = () => { inner.decodeQueueSize--; (inner as any).ondequeue?.(); };
+
+  beforeEach(() => {
+    FakeVideoDecoder.instances = [];
+    vi.stubGlobal('VideoDecoder', FakeVideoDecoder);
+    vi.stubGlobal('EncodedVideoChunk', FakeChunk);
+    overflow = vi.fn();
+    decoder = new WebCodecsDecoder({ onQueueOverflow: overflow, maxQueueSize: 6, maxInDecoder: 2, logger: quiet });
+    inner = FakeVideoDecoder.instances[0];
+    inner.decode.mockImplementation(() => { inner.decodeQueueSize++; });
+    (decoder as any).config = { codec: 'av01.0.08M.08' };
+    inner.configure((decoder as any).config);
+    (decoder as any).outputSinceConfigure = true;
+  });
+
+  it('gives the decoder only so many chunks at once, the rest as it takes them', () => {
+    for (let i = 1; i <= 4; i++) decoder.decodeBinary(frame(i === 1, i));
+    expect(inner.decode).toHaveBeenCalledTimes(2);
+    expect(decoder.decodeQueueSize).toBe(4);
+    expect(decoder.oldestQueuedTimestamp).toBe(60_000);
+
+    take();
+    expect(inner.decode).toHaveBeenCalledTimes(3);
+    expect((inner.decode.mock.calls[2][0] as FakeChunk).timestamp).toBe(60_000);
+    take();
+    take();
+    expect(inner.decode).toHaveBeenCalledTimes(4);
+    expect(decoder.oldestQueuedTimestamp).toBeNaN();
+  });
+
+  it('lets the waiting chunks go without restarting the decoder', () => {
+    for (let i = 1; i <= 5; i++) decoder.decodeBinary(frame(i === 1, i));
+    expect(decoder.discardQueued()).toBe(3);
+    expect(inner.reset).not.toHaveBeenCalled();
+    expect(decoder.decodeQueueSize).toBe(2);
+
+    // The chunks the decoder holds still come out; the keyframe given next follows them
+    decoder.decodeBinary(frame(true, 6));
+    take();
+    expect(inner.decode).toHaveBeenCalledTimes(3);
+    expect((inner.decode.mock.calls[2][0] as FakeChunk).type).toBe('key');
+  });
+
+  it('carries on from a keyframe that finds the queue full, without restarting', () => {
+    for (let i = 1; i <= 7; i++) decoder.decodeBinary(frame(i === 1, i));
+    decoder.decodeBinary(frame(false, 8));
+    expect(overflow).toHaveBeenCalledWith(7);
+
+    decoder.decodeBinary(frame(true, 9));
+    expect(inner.reset).not.toHaveBeenCalled();
+    expect(decoder.decodeQueueSize).toBe(3);
+    expect(decoder.oldestQueuedTimestamp).toBe(180_000);
+  });
+
+  it('decodes the waiting chunks too when flushed', async () => {
+    for (let i = 1; i <= 4; i++) decoder.decodeBinary(frame(i === 1, i));
+    await decoder.flush();
+    expect(inner.decode).toHaveBeenCalledTimes(4);
+    expect(inner.flush).toHaveBeenCalledOnce();
+  });
+
+  it('drops the waiting chunks on reset', () => {
+    for (let i = 1; i <= 4; i++) decoder.decodeBinary(frame(i === 1, i));
+    decoder.reset();
+    expect(decoder.decodeQueueSize).toBe(0);
   });
 });
