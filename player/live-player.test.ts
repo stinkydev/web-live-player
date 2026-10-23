@@ -220,4 +220,16 @@ describe('LiveVideoPlayer with a decoder that falls behind', () => {
     expect(requestKeyframe).not.toHaveBeenCalled();
     expect(1000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual(FRAME_MS * 1000);
   });
+
+  it('does not let short stalls add up to a delay that never comes down', () => {
+    // packets on time, so their decode latency counts towards the video's minimum delay
+    p.packetLatenessMs = 0;
+    // one stall of 200 ms, then one of 60 ms between every two keyframes - each too short to skip
+    play(0, 3000, (n) => (n >= 120 && n < 130) || (n > 200 && n % GOP >= 30 && n % GOP < 33));
+    const delayMs = player.getStats().sync.effectiveDelayMs;
+    expect(delayMs).toBeLessThan(200);
+    // within the delay, past the chunks the decoder holds: frames still come out in time
+    expect(3000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual((delayMs + 4 * FRAME_MS) * 1000);
+    expect(skips).toBeGreaterThan(0);
+  });
 });

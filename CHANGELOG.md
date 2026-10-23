@@ -6,6 +6,14 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **Short decoder stalls no longer add up to a latency that never comes down.** A backlog
+  shorter than the skip limit counted towards the video's minimum delay, the higher delay raised
+  the skip limit with it, and each stall below the limit (a busy main thread, a garbage
+  collection) added to the latency for good: in a test, a 200 ms stall and one of 60 ms every
+  two seconds took it to 1.9 s within a minute. Frames that wait behind others no longer count
+  towards the minimum delay, and a backlog longer than the delay is skipped at the next keyframe,
+  without the 250 ms floor a decoder restart needed.
+
 - **A decoder that falls behind catches up without stalling every keyframe.** 0.2.2 restarted a
   decoder holding more than the delay's worth of frames at the next keyframe. A hardware decoder
   takes about half a second to start up again, and the frames arriving meanwhile left it behind

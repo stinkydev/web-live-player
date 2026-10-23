@@ -930,18 +930,21 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       const backlogMs = (timestampUs - this.decoder.oldestQueuedTimestamp) / 1000;
       const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
       const behind = backlogMs > this.decodeBacklogLimitMs();
+      let waits = backlogMs === backlogMs;
       if (behind && isKeyframe) {
         const skipped = this.decoder.discardQueued();
         this.logger.warn(`Decoder ${Math.round(backlogMs)} ms behind, skipping ${skipped} frames to a keyframe`);
         this.backlogKeyframeRequested = false;
+        waits = false;
       } else if (behind && !hidden && !this.backlogKeyframeRequested) {
         // Rather than wait up to a group for the next one
         this.backlogKeyframeRequested = true;
         this.streamSource?.requestKeyframe?.();
       }
-      // A frame waiting behind a backlog, or in a hidden tab, says nothing about how long
-      // decoding takes: keep it out of the latency the picture is given (as a replayed one)
-      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, (behind && !isKeyframe) || hidden ? NaN : this.packetLatenessMs);
+      // A frame waiting behind others, or in a hidden tab, says nothing about how long decoding
+      // takes: keep it out of the latency the picture is given (as a replayed one). Counted, a
+      // backlog would raise the delay, the delay the backlog allowed, and so on for good.
+      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, waits || hidden ? NaN : this.packetLatenessMs);
 
       // Estimate FPS from timestamp difference between consecutive frames
       if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
@@ -1013,9 +1016,13 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     }
   }
 
-  /** How far behind the newest packet the decoder may be before it counts as behind: the delay (at least 250 ms) */
+  /**
+   * How far behind the newest packet the decoder may be before it counts as behind: the delay,
+   * past which its frames come out late. The backlog is kept out of the delay, so the two never
+   * raise each other.
+   */
   private decodeBacklogLimitMs(): number {
-    return Math.max(this.clock.getEffectiveDelay(), 250);
+    return this.clock.getEffectiveDelay();
   }
 
   /** Find a recorded packet by stream timestamp, newest first. Returns -1 if unknown. */
