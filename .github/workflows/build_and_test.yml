@@ -12,7 +12,8 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
+        # vitest 5 needs Node ^22.12 or ^24 (it runs on rolldown, which needs util.styleText)
+        node-version: [22.x, 24.x]
 
     steps:
       - name: Checkout repository
