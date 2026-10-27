@@ -70,13 +70,3 @@ export const silentLogger: Logger = {
   warn: () => {},
   error: () => {},
 };
-
-/**
- * Augment WebCodecs VideoDecoderConfig with latencyMode
- * (not yet in standard TypeScript DOM types)
- */
-declare global {
-  interface VideoDecoderConfig {
-    latencyMode?: 'quality' | 'realtime';
-  }
-}

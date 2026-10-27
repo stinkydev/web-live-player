@@ -22,6 +22,13 @@ export interface DecoderConfig {
    * order, where discardQueued() can let them go without restarting the decoder.
    */
   maxInDecoder?: number;
+  /**
+   * Frames the VideoDecoder may hold at once, counting from the chunk going in to its frame
+   * coming out (default: no limit). A decoder can take chunks in faster than it puts frames out,
+   * so maxInDecoder alone does not keep a backlog here. Leave room for the frames it keeps back
+   * to reorder (up to 16 for H.264), or it waits for chunks it is never given.
+   */
+  maxFramesInDecoder?: number;
 }
 
 /**
@@ -47,6 +54,11 @@ export class WebCodecsDecoder implements IVideoDecoder {
   // Chunks given and not yet passed to the VideoDecoder, oldest first from waitingHead
   private waiting: (EncodedVideoChunk | undefined)[] = [];
   private waitingHead = 0;
+  private maxFramesInDecoder: number;
+  // Timestamps of the chunks passed to the VideoDecoder whose frames have not come out yet, and
+  // when each was passed to it
+  private inDecoder: number[] = [];
+  private inDecoderSince: number[] = [];
   
   public onFrameDecoded?: (frame: VideoFrame) => void;
   public onError?: (error: Error) => void;
@@ -66,6 +78,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
     this.onQueueOverflow = options.onQueueOverflow;
     this.maxQueueSize = options.maxQueueSize ?? 10;
     this.maxInDecoder = Math.max(1, options.maxInDecoder ?? Infinity);
+    this.maxFramesInDecoder = Math.max(1, options.maxFramesInDecoder ?? Infinity);
     this.createDecoder();
   }
   
@@ -77,6 +90,26 @@ export class WebCodecsDecoder implements IVideoDecoder {
   /** Timestamp of the oldest chunk waiting to be passed to the decoder, µs; NaN when none waits */
   get oldestQueuedTimestamp(): number {
     return this.waitingHead < this.waiting.length ? this.waiting[this.waitingHead]!.timestamp : NaN;
+  }
+
+  /**
+   * Chunks passed to the VideoDecoder whose frames have not come out yet. Unlike decodeQueueSize,
+   * this counts those it has taken in too: a decoder can take chunks in as they come and still
+   * hold them up, beyond the reach of discardQueued().
+   */
+  get framesInDecoder(): number {
+    return this.inDecoder.length;
+  }
+
+  /**
+   * When the chunk of the frame being put out was passed to the VideoDecoder (performance.now()),
+   * NaN if not known: read it in onFrameDecoded.
+   */
+  outputStartedAt = NaN;
+
+  /** Whether the decoder has yet to put out a frame since it was configured or reset */
+  get starting(): boolean {
+    return !this.outputSinceConfigure;
   }
 
   private get waitingCount(): number {
@@ -102,6 +135,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
     this.decoder = new VideoDecoder({
       output: (frame) => {
         this.framesDecoded++;
+        this.cameOut(frame.timestamp);
         this.outputSinceConfigure = true;
         if (this.onFrameDecoded) {
           this.onFrameDecoded(frame);
@@ -122,11 +156,38 @@ export class WebCodecsDecoder implements IVideoDecoder {
     this.decoder.ondequeue = () => this.feed();
   }
 
-  /** Pass waiting chunks to the decoder while it holds fewer than maxInDecoder */
+  /**
+   * A frame came out. Frames come out in timestamp order, so the chunks of earlier ones still
+   * counted in never will (the decoder dropped them): they go too, or they would hold room
+   * for good.
+   */
+  private cameOut(timestamp: number): void {
+    const held = this.inDecoder;
+    const since = this.inDecoderSince;
+    this.outputStartedAt = NaN;
+    let kept = 0;
+    for (let i = 0; i < held.length; i++) {
+      if (held[i] === timestamp) this.outputStartedAt = since[i];
+      if (held[i] > timestamp) {
+        since[kept] = since[i];
+        held[kept++] = held[i];
+      }
+    }
+    held.length = kept;
+    since.length = kept;
+  }
+
+  /** Whether the decoder has room for another chunk */
+  private hasRoom(): boolean {
+    return (this.decoder?.decodeQueueSize ?? 0) < this.maxInDecoder &&
+      this.inDecoder.length < this.maxFramesInDecoder;
+  }
+
+  /** Pass waiting chunks to the decoder while it has room */
   private feed(): void {
     const decoder = this.decoder;
     while (this.waitingHead < this.waiting.length && decoder && decoder.state === 'configured' &&
-      decoder.decodeQueueSize < this.maxInDecoder) {
+      this.hasRoom()) {
       const chunk = this.waiting[this.waitingHead]!;
       this.waiting[this.waitingHead++] = undefined;
       this.submit(chunk);
@@ -139,7 +200,7 @@ export class WebCodecsDecoder implements IVideoDecoder {
 
   /** Give a chunk to the decoder, or have it wait its turn */
   private enqueue(chunk: EncodedVideoChunk): void {
-    if (this.waitingCount === 0 && (this.decoder?.decodeQueueSize ?? 0) < this.maxInDecoder) {
+    if (this.waitingCount === 0 && this.hasRoom()) {
       this.submit(chunk);
       return;
     }
@@ -151,6 +212,8 @@ export class WebCodecsDecoder implements IVideoDecoder {
     try {
       this.chunksSentToDecoder++;
       this.decoder?.decode(chunk);
+      this.inDecoder.push(chunk.timestamp);
+      this.inDecoderSince.push(performance.now());
     } catch (e) {
       this.logger.error(`Decode error: ${e}`);
     }
@@ -222,14 +285,14 @@ export class WebCodecsDecoder implements IVideoDecoder {
         codedWidth: width,
         codedHeight: height,
         hardwareAcceleration: preferHardware ? 'prefer-hardware' : 'prefer-software',
-        latencyMode: 'realtime',
+        optimizeForLatency: true,
       },
       {
         codec: codecString,
         codedWidth: width,
         codedHeight: height,
         hardwareAcceleration: preferHardware ? 'prefer-software' : 'prefer-hardware',
-        latencyMode: 'realtime',
+        optimizeForLatency: true,
       },
     ];
     
@@ -368,6 +431,8 @@ export class WebCodecsDecoder implements IVideoDecoder {
   flushSync(): void {
     this.flushing = true;
     this.discardQueued();
+    this.inDecoder.length = 0;
+    this.inDecoderSince.length = 0;
     if (this.decoder && this.decoder.state !== 'closed') {
       this.decoder.reset();
       
@@ -384,6 +449,8 @@ export class WebCodecsDecoder implements IVideoDecoder {
    */
   reset(): void {
     this.discardQueued();
+    this.inDecoder.length = 0;
+    this.inDecoderSince.length = 0;
     if (this.decoder && this.decoder.state !== 'closed') {
       this.decoder.reset();
       
@@ -399,6 +466,8 @@ export class WebCodecsDecoder implements IVideoDecoder {
    */
   dispose(): void {
     this.discardQueued();
+    this.inDecoder.length = 0;
+    this.inDecoderSince.length = 0;
     if (this.decoder) {
       if (this.decoder.state !== 'closed') {
         this.decoder.close();

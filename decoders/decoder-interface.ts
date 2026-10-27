@@ -61,8 +61,20 @@ export interface IVideoDecoder {
    */
   /** Chunks submitted and not yet taken by the decoder. */
   readonly decodeQueueSize: number;
-  /** Timestamp of the oldest chunk that can still be let go, µs; NaN when there is none */
+  /**
+   * Timestamp of the oldest chunk waiting its turn - not yet being decoded, and free to let go
+   * with discardQueued() - µs; NaN when none waits
+   */
   readonly oldestQueuedTimestamp?: number;
+  /** Frames being decoded: taken in, not yet out. Only a restart lets them go. */
+  readonly framesInDecoder?: number;
+  /**
+   * When decoding of the frame being put out started (performance.now()), NaN if not known: read
+   * it while the frame is handed over. Up to then it waited its turn.
+   */
+  readonly outputStartedAt?: number;
+  /** Whether the decoder has yet to put out a frame since it was configured or reset */
+  readonly starting?: boolean;
   /**
    * Let go of the queued chunks without restarting the decoder; the next chunk given must be a
    * keyframe. Returns how many.

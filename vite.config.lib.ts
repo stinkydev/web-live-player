@@ -12,6 +12,8 @@ export default defineConfig({
   // the Rollup-based build did.
   define: {
     'import.meta.url': 'self.location.href',
+    // Logged as a player starts, to tell which build an app runs
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
   },
 
   // Inline workers for library build so consumers don't need to handle worker files

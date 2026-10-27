@@ -34,9 +34,17 @@ export class WasmDecoder implements IVideoDecoder {
   /** Access units submitted, used to discard pictures decoded before a flush */
   private seq: number = 0;
   private flushSeq: number = 0;
-  // Timestamps of the pictures in flight, in decode order (Broadway outputs in that order)
+  // Timestamps of the pictures in flight, in decode order (Broadway outputs in that order), and
+  // when each was posted. The worker decodes one at a time: the first is being decoded, the
+  // rest wait their turn.
   private queuedTimestamps: Float64Array;
+  private queuedPostTimes: Float64Array;
   private queuedHead: number = 0;
+  private lastPictureAt = -Infinity;
+
+  /** When decoding of the picture being put out started, NaN if not known: read it in onFrameDecoded */
+  outputStartedAt = NaN;
+  readonly starting = false;
 
   private onFrameDecoded?: (frame: YUVFrame) => void;
   private onError?: (error: Error) => void;
@@ -52,15 +60,21 @@ export class WasmDecoder implements IVideoDecoder {
     this.maxQueueSize = config.maxQueueSize ?? 10;
     // Back-pressure lets the queue reach one over the limit
     this.queuedTimestamps = new Float64Array(this.maxQueueSize + 2);
+    this.queuedPostTimes = new Float64Array(this.maxQueueSize + 2);
   }
 
   get queueSize(): number {
     return this._queueSize;
   }
 
-  /** Timestamp of the oldest picture still being decoded, µs; NaN when none is */
+  /** Timestamp of the oldest picture waiting its turn, µs; NaN when none waits */
   get oldestQueuedTimestamp(): number {
-    return this._queueSize > 0 ? this.queuedTimestamps[this.queuedHead] : NaN;
+    return this._queueSize > 1 ? this.queuedTimestamps[(this.queuedHead + 1) % this.queuedTimestamps.length] : NaN;
+  }
+
+  /** Pictures being decoded: the worker works on one at a time */
+  get framesInDecoder(): number {
+    return Math.min(this._queueSize, 1);
   }
 
   /**
@@ -172,7 +186,9 @@ export class WasmDecoder implements IVideoDecoder {
     // Only slices produce a picture; counting parameter sets would stall the queue
     if (expectsPicture) {
       const size = this.queuedTimestamps.length;
-      this.queuedTimestamps[(this.queuedHead + this._queueSize) % size] = pts;
+      const slot = (this.queuedHead + this._queueSize) % size;
+      this.queuedTimestamps[slot] = pts;
+      this.queuedPostTimes[slot] = performance.now();
       this._queueSize++;
     }
   }
@@ -204,12 +220,18 @@ export class WasmDecoder implements IVideoDecoder {
    * Handle decoded picture from worker
    */
   private handlePictureReady(message: { width: number; height: number; data: ArrayBuffer; pts?: number; seq?: number }): void {
+    // The worker started on this picture once it was posted and the one before was done
+    const previousAt = this.lastPictureAt;
+    this.lastPictureAt = performance.now();
+
     // Discard pictures that were decoded before the last flush
     if ((message.seq ?? 0) < this.flushSeq) {
       return;
     }
 
+    this.outputStartedAt = NaN;
     if (this._queueSize > 0) {
+      this.outputStartedAt = Math.max(this.queuedPostTimes[this.queuedHead], previousAt);
       this._queueSize--;
       this.queuedHead = (this.queuedHead + 1) % this.queuedTimestamps.length;
     }

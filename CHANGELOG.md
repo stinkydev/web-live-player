@@ -2,7 +2,37 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.2.5
+
+### Fixed
+
+- **A backlog inside the decoder no longer holds the latency up for good.** A `VideoDecoder`
+  can take chunks in as they come and still hold them up: stalled, or unable to put out a frame
+  until the player lets one go. `decodeQueueSize` stops counting a chunk once it is taken in, so
+  the four-at-a-time limit did not keep the backlog in the player, where it can be let go. Its
+  frames came out as late as the delay allowed, counted towards the video's minimum delay, and
+  the delay rose to cover them: in a test, one 1.7 s stall left the picture 1.7 s behind for
+  good, the overlay showing the delay "needed" by the video. The decoder now holds at most 20
+  frames from chunk in to frame out (the four it is given at a time and the 16 H.264 may keep
+  back to reorder; `maxFramesInDecoder` and `framesInDecoder` on `WebCodecsDecoder`), and the
+  rest wait in the player. The decoder's latency is measured from when a chunk goes into it, so
+  every frame counts, whatever it waited before, and a stall's latency is gone from the minimum
+  delay within about 60 frames (before, a minimum raised by turning the screen off could stay
+  for minutes, as frames that had waited never counted). A backlog in the player is skipped at a
+  keyframe once it has made frames late, the time decoding takes included, for half a second
+  without a break: the chunk or two a decoder leaves waiting now and then no longer set off a
+  skip, and a keyframe request, at every keyframe. A decoder held full for longer than the delay
+  asked for is restarted at a keyframe, at most every 30 s. Frames decoded while a decoder
+  starts up no longer count towards the minimum delay. The WASM decoder is handled the same way:
+  its worker decodes one picture at a time, so the rest of its queue counts as waiting
+  (`IVideoDecoder` gains `framesInDecoder`, `outputStartedAt` and `starting`).
+
+- **The live decoder is configured for low latency.** It was given `latencyMode: 'realtime'`, an
+  encoder option the decoder ignores, so it could keep frames back (frame-threaded software
+  decoding, for one). It now gets `optimizeForLatency: true`. The global `VideoDecoderConfig`
+  augmentation adding `latencyMode` is gone.
+
+## 0.2.4
 
 ### Fixed
 
@@ -13,6 +43,10 @@ All notable changes to this project are documented here.
   two seconds took it to 1.9 s within a minute. Frames that wait behind others no longer count
   towards the minimum delay, and a backlog longer than the delay is skipped at the next keyframe,
   without the 250 ms floor a decoder restart needed.
+
+## 0.2.3
+
+### Fixed
 
 - **A decoder that falls behind catches up without stalling every keyframe.** 0.2.2 restarted a
   decoder holding more than the delay's worth of frames at the next keyframe. A hardware decoder
