@@ -21,6 +21,11 @@ import { codecDataChanged, rescaleTime, timebaseFromCodecData, MICROSECOND_TIMEB
 import { LiveAudioPlayer, LiveAudioStats } from '../audio/live-audio-player';
 import { BasePlayer } from './base-player';
 import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputing/sesame-api-client';
+import { version } from '../package.json';
+
+/** Set by the library build; absent when the source is used directly */
+declare const __BUILD_TIME__: string | undefined;
+const BUILD = typeof __BUILD_TIME__ === 'undefined' ? `${version} (from source)` : `${version}, built ${__BUILD_TIME__}`;
 
 /**
  * Chunks the decoder may hold before a delta frame is dropped: ten seconds at 50 fps. A
@@ -31,11 +36,25 @@ import { FrameType, IMediaCodecData, ParsedFrame, sesame } from '@stinkycomputin
 const MAX_DECODE_QUEUE = 512;
 
 /**
- * Chunks the VideoDecoder holds at once: enough to keep a hardware decoder busy. The rest wait in
- * the player, where a backlog can be let go at a keyframe without restarting the decoder - a
- * hardware decoder takes long enough to start up again that a restart only builds a new backlog.
+ * Chunks the VideoDecoder is given at a time, waiting for it to take them in: enough to keep a
+ * hardware decoder busy. The rest wait in the player, where a backlog can be let go at a keyframe
+ * without restarting the decoder - a hardware decoder takes long enough to start up again that a
+ * restart only builds a new backlog.
  */
 const MAX_IN_DECODER = 4;
+
+/**
+ * Frames the VideoDecoder holds at once, from chunk in to frame out: the chunks it is given at a
+ * time and the 16 H.264 may keep back to reorder. A decoder can take chunks in faster than it puts
+ * frames out; past this they wait in the player too.
+ */
+const MAX_FRAMES_IN_DECODER = MAX_IN_DECODER + 16;
+
+/**
+ * A decoder held full is restarted at most this often. One that only keeps pace can fill up again
+ * while it starts up, and restarting it at every keyframe would hold the picture each time.
+ */
+const DECODER_RESTART_INTERVAL_MS = 30_000;
 
 /**
  * Decoded frames held for display: at least this many, and enough for the clock's delay at the
@@ -50,6 +69,13 @@ const STATS_SMOOTHING = 0.1;
 const DECODE_WINDOW = 60;
 /** Packets later than this (the backlog a subscription opens with) say nothing about decoding */
 const ON_TIME_MS = 20;
+
+/**
+ * A backlog counts once it has stayed this long without a break. A decoder that keeps up works
+ * through what waits now and then - it takes chunks in at a rhythm of its own - and skipping that
+ * would jump the picture, and ask the source for a keyframe, for nothing.
+ */
+const BACKLOG_PERSIST_MS = 500;
 
 /** The frames from the last keyframe on; all of them when none is a keyframe. */
 export function framesFromLastKeyframe(frames: ParsedFrame[]): ParsedFrame[] {
@@ -274,11 +300,14 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   // Decode latency of on-time packets, for the least delay the picture needs
   private decodeLatencies = new Float64Array(DECODE_WINDOW);
   private decodeLatencyCount = 0;
-  // A keyframe was asked for since the decoder last fell behind
-  private backlogKeyframeRequested = false;
   private decodeLatencyWrite = 0;
   private decodeSorted = new Float64Array(DECODE_WINDOW);
   private videoMinimumDelayMs = 0;
+  // Catching up: since when the chunks waiting for the decoder have made frames late without a
+  // break (NaN while they do not), whether a keyframe was asked for since, the last restart
+  private backlogSince = NaN;
+  private backlogKeyframeRequested = false;
+  private lastDecoderRestart = -Infinity;
   private timingWrite: number = 0;
   private timingCount: number = 0;
 
@@ -296,6 +325,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
 
   constructor(config: PlayerConfig = {}) {
     super('idle', config.debugLogging ?? false);
+    this.logger.info(`web-live-player ${BUILD}`);
 
     this.config = {
       preferredDecoder: config.preferredDecoder ?? 'webcodecs-sw',
@@ -922,29 +952,12 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
       const arrivalTime = performance.now();
       const timestampUs = rescaleTime(data.header.media?.pts ?? 0, this.currentTimebase, MICROSECOND_TIMEBASE);
 
-      // A decoder that has fallen behind - stopped while the tab was hidden, or given a group at
-      // once by a new subscription - only keeps pace afterwards, so its backlog would stay for
-      // good. What waits longer than the delay is late anyway: at a keyframe the waiting chunks
-      // are let go and decoding carries on from it. The decoder is not restarted, so nothing
-      // stalls while it starts up again.
-      const backlogMs = (timestampUs - this.decoder.oldestQueuedTimestamp) / 1000;
       const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
-      const behind = backlogMs > this.decodeBacklogLimitMs();
-      let waits = backlogMs === backlogMs;
-      if (behind && isKeyframe) {
-        const skipped = this.decoder.discardQueued();
-        this.logger.warn(`Decoder ${Math.round(backlogMs)} ms behind, skipping ${skipped} frames to a keyframe`);
-        this.backlogKeyframeRequested = false;
-        waits = false;
-      } else if (behind && !hidden && !this.backlogKeyframeRequested) {
-        // Rather than wait up to a group for the next one
-        this.backlogKeyframeRequested = true;
-        this.streamSource?.requestKeyframe?.();
-      }
-      // A frame waiting behind others, or in a hidden tab, says nothing about how long decoding
-      // takes: keep it out of the latency the picture is given (as a replayed one). Counted, a
-      // backlog would raise the delay, the delay the backlog allowed, and so on for good.
-      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, waits || hidden ? NaN : this.packetLatenessMs);
+      this.catchUp(timestampUs, arrivalTime, isKeyframe, hidden);
+      // A frame in a hidden tab, or given to a decoder starting up, says nothing about how long
+      // decoding takes: keep it out of the latency the picture is given (as a replayed one)
+      const timed = !hidden && !this.decoder.starting;
+      this.recordPacketTiming(timestampUs, arrivalTime, isKeyframe, timed ? this.packetLatenessMs : NaN);
 
       // Estimate FPS from timestamp difference between consecutive frames
       if (this.lastVideoTimestampUs >= 0 && timestampUs > this.lastVideoTimestampUs) {
@@ -1017,12 +1030,55 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
   }
 
   /**
-   * How far behind the newest packet the decoder may be before it counts as behind: the delay,
-   * past which its frames come out late. The backlog is kept out of the delay, so the two never
-   * raise each other.
+   * Let a decoder that has fallen behind catch up. Stopped (the tab hidden, the screen off) or
+   * given a group at once by a new subscription, it may only keep pace afterwards, and its
+   * backlog would stay for good.
+   *
+   * Chunks waiting their turn longer than the delay leaves once decoding has taken its time make
+   * frames late. Once they have for a while, they are let go at a keyframe and decoding carries on
+   * from it, without restarting the decoder: a hardware one takes half a second to start up again.
+   * What the decoder has taken in only comes out, late or not: held full for longer than the delay
+   * asked for, it is restarted at a keyframe - now and then, as one that only keeps pace can fill
+   * up again while it starts. Either way a keyframe is asked for rather than wait up to a group.
    */
-  private decodeBacklogLimitMs(): number {
-    return this.clock.getEffectiveDelay();
+  private catchUp(timestampUs: number, arrivalTime: number, isKeyframe: boolean, hidden: boolean): void {
+    const decoder = this.decoder!;
+    const backlogMs = (timestampUs - decoder.oldestQueuedTimestamp) / 1000;
+    // Decoding time is measured from when a chunk goes in, so the minimum never covers its wait
+    const limitMs = Math.max(0, this.clock.getEffectiveDelay() - this.videoMinimumDelayMs);
+    if (!(backlogMs > limitMs)) {
+      this.backlogSince = NaN;
+    } else if (this.backlogSince !== this.backlogSince) {
+      this.backlogSince = arrivalTime;
+    }
+    const held = decoder.framesInDecoder;
+    const clogged = held >= MAX_FRAMES_IN_DECODER &&
+      held * 1000 / (this.estimatedFrameRate || 30) > this.clock.getBufferDelay() &&
+      arrivalTime - this.lastDecoderRestart > DECODER_RESTART_INTERVAL_MS;
+    if (!clogged && !(arrivalTime - this.backlogSince >= BACKLOG_PERSIST_MS)) return;
+
+    if (!isKeyframe) {
+      if (!hidden && !this.backlogKeyframeRequested) {
+        this.backlogKeyframeRequested = true;
+        this.streamSource?.requestKeyframe?.();
+      }
+      return;
+    }
+    const skipped = decoder.discardQueued();
+    if (clogged) {
+      this.logger.warn(`Decoder holding ${held} frames, restarting it at a keyframe`);
+      decoder.reset();
+      this.lastDecoderRestart = arrivalTime;
+    } else {
+      this.logger.warn(
+        `Decoder ${Math.round(backlogMs)} ms behind, skipping ${skipped} frames to a keyframe ` +
+        `(limit ${Math.round(limitMs)} ms: delay ${this.clock.getEffectiveDelay()} ms, video needs ` +
+        `${this.videoMinimumDelayMs} ms; ${held} frames in the decoder, ${decoder.decodeQueueSize} not ` +
+        `taken in yet; ${this.frameQueue.size} decoded waiting to be shown)`
+      );
+    }
+    this.backlogSince = NaN;
+    this.backlogKeyframeRequested = false;
   }
 
   /** Find a recorded packet by stream timestamp, newest first. Returns -1 if unknown. */
@@ -1213,6 +1269,7 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
           onQueueOverflow: (queueSize) => this.handleQueueOverflow(queueSize),
           maxQueueSize: MAX_DECODE_QUEUE,
           maxInDecoder: MAX_IN_DECODER,
+          maxFramesInDecoder: MAX_FRAMES_IN_DECODER,
         });
       }
     }
@@ -1267,7 +1324,9 @@ export class LiveVideoPlayer extends BasePlayer<PlayerState> {
     this.playbackStats.recordPacket(arrivalTime, timestampUs, isKeyframe, decodeTime, i >= 0 ? this.timingLateness[i] : NaN);
     const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
     if (i >= 0 && this.timingLateness[i] <= ON_TIME_MS && !hidden) {
-      this.recordDecodeLatency(decodeTime - arrivalTime);
+      // From when decoding started: the wait before is the backlog's, not the decoder's
+      const startedAt = this.decoder?.outputStartedAt ?? NaN;
+      this.recordDecodeLatency(decodeTime - (startedAt === startedAt ? startedAt : arrivalTime));
     }
 
     let due: number | null = null;

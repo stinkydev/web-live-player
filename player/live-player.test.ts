@@ -111,17 +111,22 @@ describe('LiveVideoPlayer with a decoder that falls behind', () => {
    */
   class PacedDecoder {
     static last: PacedDecoder;
+    /** Take every chunk at once, as a decoder with a pipeline of its own does: none count as queued */
+    static takesAll = false;
+    /** Frames held back to reorder: one comes out only while it holds more */
+    static keepsBack = 0;
     state = 'unconfigured';
     held: { timestamp: number }[] = [];
     ondequeue: (() => void) | null = null;
     constructor(public init: any) { PacedDecoder.last = this; }
-    get decodeQueueSize() { return this.held.length; }
+    get decodeQueueSize() { return PacedDecoder.takesAll ? 0 : this.held.length; }
     configure = vi.fn(() => { this.state = 'configured'; });
     decode(chunk: { timestamp: number }) { this.held.push(chunk); }
     reset = vi.fn(() => { this.held = []; this.state = 'unconfigured'; });
     close() { this.state = 'closed'; }
     async flush() {}
     step() {
+      if (this.held.length <= PacedDecoder.keepsBack) return;
       const chunk = this.held.shift();
       if (!chunk) return;
       this.ondequeue?.();
@@ -161,6 +166,7 @@ describe('LiveVideoPlayer with a decoder that falls behind', () => {
       onFrameDecoded: (frame) => { lastOut = frame.timestamp; p.handleDecodedFrame(frame); },
       maxQueueSize: 512,
       maxInDecoder: 4,
+      maxFramesInDecoder: 20,
     });
     inner = PacedDecoder.last;
     p.decoder.config = { codec: 'av01.0.08M.08' };
@@ -175,6 +181,8 @@ describe('LiveVideoPlayer with a decoder that falls behind', () => {
 
   afterEach(() => {
     player.dispose();
+    PacedDecoder.takesAll = false;
+    PacedDecoder.keepsBack = 0;
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -231,5 +239,72 @@ describe('LiveVideoPlayer with a decoder that falls behind', () => {
     // within the delay, past the chunks the decoder holds: frames still come out in time
     expect(3000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual((delayMs + 4 * FRAME_MS) * 1000);
     expect(skips).toBeGreaterThan(0);
+  });
+
+  it('restarts a decoder that holds a backlog inside it, and brings the delay back down', () => {
+    PacedDecoder.takesAll = true;
+    p.packetLatenessMs = 0;
+    // stopped for 1.7 s with every chunk taken in, then only keeping pace: the backlog is out of
+    // reach of discardQueued(), and its frames' latency would hold the delay up for good
+    play(0, 199, (n) => n >= 110 && n < 195);
+    play(200, 1000);
+    expect(inner.reset).toHaveBeenCalledOnce();
+    expect(player.getStats().sync.effectiveDelayMs).toBeLessThan(200);
+    expect(1000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual(5 * FRAME_MS * 1000);
+    // past the frames it holds, the backlog waited in the player
+    expect(skips).toBe(0);
+  });
+
+  it('gives a decoder that takes every chunk in no more than it may hold', () => {
+    PacedDecoder.takesAll = true;
+    play(0, 99, (n) => n >= 10);
+    expect(p.decoder.framesInDecoder).toBe(20);
+    expect(inner.held.length).toBe(20);
+  });
+
+  it('feeds a decoder that keeps frames back to reorder them', () => {
+    PacedDecoder.takesAll = true;
+    PacedDecoder.keepsBack = 16;
+    p.packetLatenessMs = 0;
+    play(0, 1000);
+    expect(inner.reset).not.toHaveBeenCalled();
+    expect(skips).toBe(0);
+    expect(1000 * FRAME_MS * 1000 - lastOut).toBe(16 * FRAME_MS * 1000);
+  });
+
+  it('restarts a decoder held full at most every 30 s', () => {
+    PacedDecoder.takesAll = true;
+    p.packetLatenessMs = 0;
+    // a stall of 1.7 s every 4 s: refilling it each time
+    play(0, 3000, (n) => n % 200 >= 110 && n % 200 < 195);
+    expect(inner.reset).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves a decoder that takes every chunk in and keeps up alone', () => {
+    PacedDecoder.takesAll = true;
+    p.packetLatenessMs = 0;
+    play(0, 1000);
+    expect(inner.reset).not.toHaveBeenCalled();
+    expect(requestKeyframe).not.toHaveBeenCalled();
+  });
+
+  it('comes back down after a long stall, leaving the chunks a decoder lets wait alone', () => {
+    p.packetLatenessMs = 0;
+    play(0, 299);
+    // the screen goes off: the decoder stops for 3 s with all it took in in it
+    PacedDecoder.takesAll = true;
+    play(300, 449, () => true);
+    PacedDecoder.takesAll = false;
+    // then decodes in bursts, every tenth frame: two chunks wait when a keyframe comes
+    for (let n = 450; n <= 3000; n++) {
+      vi.advanceTimersByTime(FRAME_MS);
+      p.decodeVideoFrame(packet(n));
+      if (n % 10 === 3) for (let i = 0; i < 10; i++) inner.step();
+    }
+    expect(player.getStats().sync.effectiveDelayMs).toBeLessThan(250);
+    expect(3000 * FRAME_MS * 1000 - lastOut).toBeLessThanOrEqual(10 * FRAME_MS * 1000);
+    // the stall's backlog let go once, not a skip and a keyframe asked for at every keyframe
+    expect(skips + inner.reset.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(requestKeyframe.mock.calls.length).toBeLessThanOrEqual(2);
   });
 });
